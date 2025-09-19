@@ -26,6 +26,27 @@ import warnings
 warnings.filterwarnings("ignore")
 
 
+def _is_constituent(sku_cell, higher_cell, rank):
+    """
+    Check if a SKU cell is a constituent of a higher-level cell.
+    
+    Args:
+        sku_cell: Tuple representing SKU (companyID, storeID, skuID)
+        higher_cell: Tuple representing higher-level cell
+        rank: Rank of the higher-level cell (1=store, 2=company, 3=total)
+        
+    Returns:
+        bool: True if SKU belongs to the higher-level cell
+    """
+    if rank == 1:  # Store level: (companyID, storeID)
+        return sku_cell[0] == higher_cell[0] and sku_cell[1] == higher_cell[1]
+    elif rank == 2:  # Company level: (companyID,)
+        return sku_cell[0] == higher_cell[0]
+    elif rank == 3:  # Total level: ('total',)
+        return True  # All SKUs belong to total
+    return False
+
+
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='Train hierarchical forecasting model')
@@ -150,15 +171,31 @@ def evaluate_model(model, test_data, cc, preprocessor, device):
     
     for rank in sorted(cc.cells.keys()):
         level_name = f"Rank {rank}"
-        cell_indices = [cc.cell_to_int[c] for c in cc.cells[rank]]
         
-        # Aggregate predictions and actuals for the current rank
         if rank == 0:  # SKU level - individual forecasts
+            cell_indices = [cc.cell_to_int[c] for c in cc.cells[rank]]
             level_preds = pred_tensor_unscaled[:, cell_indices].flatten()
             level_actuals = actuals_tensor_unscaled[:, cell_indices].flatten()
-        else:  # Higher levels - sum over constituent cells
-            level_preds = pred_tensor_unscaled[:, cell_indices].sum(axis=1)
-            level_actuals = actuals_tensor_unscaled[:, cell_indices].sum(axis=1)
+        else:  # Higher levels - aggregate from SKU level
+            level_preds = []
+            level_actuals = []
+            
+            for cell in cc.cells[rank]:
+                # Find all SKU cells that belong to this higher-level cell
+                constituent_skus = []
+                for sku_cell in cc.cells[0]:
+                    if _is_constituent(sku_cell, cell, rank):
+                        constituent_skus.append(cc.cell_to_int[sku_cell])
+                
+                if constituent_skus:
+                    # Sum predictions and actuals for constituent SKUs
+                    cell_pred = pred_tensor_unscaled[:, constituent_skus].sum(axis=1)
+                    cell_actual = actuals_tensor_unscaled[:, constituent_skus].sum(axis=1)
+                    level_preds.extend(cell_pred.flatten())
+                    level_actuals.extend(cell_actual.flatten())
+            
+            level_preds = np.array(level_preds)
+            level_actuals = np.array(level_actuals)
 
         # Calculate metrics
         mask = level_actuals > 0  # Avoid division by zero
