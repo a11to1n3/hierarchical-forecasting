@@ -210,6 +210,18 @@ class DataPreprocessor:
         hierarchy[3] = [('total',)]
         
         return hierarchy
+
+    def create_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Public method to create features from the data.
+        
+        Args:
+            df: Input DataFrame
+            
+        Returns:
+            DataFrame with created features
+        """
+        return self._create_features(df)
 def load_and_merge_data(features_path: str, targets_path: str) -> pd.DataFrame:
     """
     Load and merge bakery features and targets data.
