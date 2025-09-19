@@ -223,6 +223,21 @@ class DataPreprocessor:
         """
         return self._create_features(df)
 
+    def create_targets(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Public method to create targets from the data.
+        
+        Args:
+            df: Input DataFrame
+            
+        Returns:
+            DataFrame with target column
+        """
+        # Simply return the target column as a DataFrame
+        if 'target' not in df.columns:
+            raise ValueError("Target column not found in DataFrame")
+        return df[['target']]
+
     def split_data(self, df: pd.DataFrame, test_period: int = 30, val_period: int = 30):
         """
         Split data into train, validation, and test sets chronologically.
