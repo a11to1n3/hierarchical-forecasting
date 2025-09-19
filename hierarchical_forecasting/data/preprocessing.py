@@ -113,10 +113,18 @@ class DataPreprocessor:
         
         # Time-based features
         if date_col is not None:
-            df['day_of_week'] = date_col.dayofweek
-            df['month'] = date_col.month
-            df['quarter'] = date_col.quarter
-            df['day_of_year'] = date_col.dayofyear
+            if isinstance(date_col, pd.DatetimeIndex):
+                # For DatetimeIndex, use direct attributes
+                df['day_of_week'] = date_col.dayofweek
+                df['month'] = date_col.month
+                df['quarter'] = date_col.quarter
+                df['day_of_year'] = date_col.dayofyear
+            else:
+                # For Series, use .dt accessor
+                df['day_of_week'] = date_col.dt.dayofweek
+                df['month'] = date_col.dt.month
+                df['quarter'] = date_col.dt.quarter
+                df['day_of_year'] = date_col.dt.dayofyear
             
             # Cyclical encoding
             df['day_of_week_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
