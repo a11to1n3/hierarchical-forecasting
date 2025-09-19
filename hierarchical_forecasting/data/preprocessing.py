@@ -221,7 +221,20 @@ class DataPreprocessor:
         Returns:
             DataFrame with created features
         """
-        return self._create_features(df)
+        df_with_features = self._create_features(df)
+        
+        # Create entity_id column for baseline comparison
+        if 'companyID' in df_with_features.columns and 'storeID' in df_with_features.columns and 'skuID' in df_with_features.columns:
+            # Reset index to access companyID, storeID, skuID if they're in the index
+            if isinstance(df_with_features.index, pd.DatetimeIndex):
+                df_reset = df_with_features.reset_index()
+            else:
+                df_reset = df_with_features.copy()
+            
+            # Create entity_id as tuple of (companyID, storeID, skuID)
+            df_with_features['entity_id'] = list(df_reset[['companyID', 'storeID', 'skuID']].apply(tuple, axis=1))
+        
+        return df_with_features
 
     def create_targets(self, df: pd.DataFrame) -> pd.DataFrame:
         """
