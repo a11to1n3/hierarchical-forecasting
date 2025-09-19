@@ -136,6 +136,205 @@ def evaluate_model(model, X_test: np.ndarray, y_test: np.ndarray,
         }
 
 
+def evaluate_hierarchical_metrics(model, X_test, y_test, entities_test, hierarchy, **kwargs):
+    """
+    Evaluate model performance at each hierarchy level like the CCMPN model.
+    
+    Args:
+        model: Trained model
+        X_test: Test features
+        y_test: Test targets
+        entities_test: Entity identifiers for test data
+        hierarchy: Hierarchy structure
+        **kwargs: Additional arguments for model prediction
+        
+    Returns:
+        Dictionary with hierarchical metrics
+    """
+    try:
+        # Get base predictions
+        predictions = model.predict(X_test, **kwargs)
+        
+        # Initialize results for each rank
+        hierarchical_results = {}
+        
+        for rank in range(4):  # Ranks 0-3
+            # Get entities at this rank
+            if rank == 0:  # SKU level
+                # Direct predictions for individual SKUs
+                mask = np.array([entity in hierarchy[0] for entity in entities_test])
+                if mask.sum() > 0:
+                    level_preds = predictions[mask]
+                    level_actuals = y_test[mask]
+                else:
+                    continue
+                    
+            elif rank == 1:  # Store level
+                # Aggregate by store (companyID, storeID)
+                store_entities = hierarchy[1]
+                level_preds = []
+                level_actuals = []
+                
+                for store in store_entities:
+                    # Find all SKUs belonging to this store
+                    sku_mask = np.array([
+                        entity[:2] == store for entity in entities_test
+                    ])
+                    if sku_mask.sum() > 0:
+                        level_preds.append(predictions[sku_mask].sum())
+                        level_actuals.append(y_test[sku_mask].sum())
+                
+                if not level_preds:
+                    continue
+                level_preds = np.array(level_preds)
+                level_actuals = np.array(level_actuals)
+                
+            elif rank == 2:  # Company level
+                # Aggregate by company (companyID,)
+                company_entities = hierarchy[2]
+                level_preds = []
+                level_actuals = []
+                
+                for company in company_entities:
+                    # Find all SKUs belonging to this company
+                    sku_mask = np.array([
+                        entity[0] == company[0] for entity in entities_test
+                    ])
+                    if sku_mask.sum() > 0:
+                        level_preds.append(predictions[sku_mask].sum())
+                        level_actuals.append(y_test[sku_mask].sum())
+                
+                if not level_preds:
+                    continue
+                level_preds = np.array(level_preds)
+                level_actuals = np.array(level_actuals)
+                
+            elif rank == 3:  # Total level
+                # Aggregate all predictions
+                level_preds = np.array([predictions.sum()])
+                level_actuals = np.array([y_test.sum()])
+            
+            # Calculate metrics for this level
+            if len(level_preds) > 0 and len(level_actuals) > 0:
+                # Filter out zero actuals for WAPE calculation
+                nonzero_mask = level_actuals > 0
+                if nonzero_mask.sum() > 0:
+                    # WAPE (Weighted Absolute Percentage Error)
+                    wape = np.sum(np.abs(level_actuals[nonzero_mask] - level_preds[nonzero_mask])) / np.sum(np.abs(level_actuals[nonzero_mask]))
+                    
+                    # R²
+                    r2 = r2_score(level_actuals[nonzero_mask], level_preds[nonzero_mask])
+                    
+                    # MAE
+                    mae = mean_absolute_error(level_actuals[nonzero_mask], level_preds[nonzero_mask])
+                    
+                    # RMSE
+                    rmse = np.sqrt(mean_squared_error(level_actuals[nonzero_mask], level_preds[nonzero_mask]))
+                    
+                    hierarchical_results[f'Rank_{rank}_WAPE'] = wape
+                    hierarchical_results[f'Rank_{rank}_R2'] = r2
+                    hierarchical_results[f'Rank_{rank}_MAE'] = mae
+                    hierarchical_results[f'Rank_{rank}_RMSE'] = rmse
+                else:
+                    # No valid data for this rank
+                    hierarchical_results[f'Rank_{rank}_WAPE'] = np.nan
+                    hierarchical_results[f'Rank_{rank}_R2'] = np.nan
+                    hierarchical_results[f'Rank_{rank}_MAE'] = np.nan
+                    hierarchical_results[f'Rank_{rank}_RMSE'] = np.nan
+            else:
+                # No data for this rank
+                hierarchical_results[f'Rank_{rank}_WAPE'] = np.nan
+                hierarchical_results[f'Rank_{rank}_R2'] = np.nan
+                hierarchical_results[f'Rank_{rank}_MAE'] = np.nan
+                hierarchical_results[f'Rank_{rank}_RMSE'] = np.nan
+        
+        return hierarchical_results
+        
+    except Exception as e:
+        print(f"Error in hierarchical evaluation: {e}")
+        # Return NaN values for all metrics
+        hierarchical_results = {}
+        for rank in range(4):
+            hierarchical_results[f'Rank_{rank}_WAPE'] = np.nan
+            hierarchical_results[f'Rank_{rank}_R2'] = np.nan
+            hierarchical_results[f'Rank_{rank}_MAE'] = np.nan
+            hierarchical_results[f'Rank_{rank}_RMSE'] = np.nan
+        return hierarchical_results
+
+
+def evaluate_model(model, X_test, y_test, entities_test=None, hierarchy=None, **kwargs):
+    """
+    Evaluate model performance including hierarchical metrics.
+    
+    Args:
+        model: Trained model
+        X_test: Test features
+        y_test: Test targets
+        entities_test: Entity identifiers (optional, for hierarchical metrics)
+        hierarchy: Hierarchy structure (optional, for hierarchical metrics)
+        **kwargs: Additional arguments for model prediction
+        
+    Returns:
+        Dictionary with evaluation metrics
+    """
+    try:
+        start_time = time.time()
+        predictions = model.predict(X_test, **kwargs)
+        prediction_time = time.time() - start_time
+        
+        # Calculate basic metrics
+        mse = mean_squared_error(y_test, predictions)
+        mae = mean_absolute_error(y_test, predictions)
+        rmse = np.sqrt(mse)
+        
+        # R-squared
+        ss_res = np.sum((y_test - predictions) ** 2)
+        ss_tot = np.sum((y_test - np.mean(y_test)) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+        
+        # MAPE (avoiding division by zero)
+        mape = np.mean(np.abs((y_test - predictions) / np.where(y_test == 0, 1, y_test))) * 100
+        
+        results = {
+            'MSE': mse,
+            'MAE': mae,
+            'RMSE': rmse,
+            'R2': r2,
+            'MAPE': mape,
+            'Prediction_Time': prediction_time
+        }
+        
+        # Add hierarchical metrics if data is available
+        if entities_test is not None and hierarchy is not None:
+            hierarchical_metrics = evaluate_hierarchical_metrics(
+                model, X_test, y_test, entities_test, hierarchy, **kwargs
+            )
+            results.update(hierarchical_metrics)
+        
+        return results
+    
+    except Exception as e:
+        print(f"Error evaluating model {getattr(model, 'name', 'Unknown')}: {e}")
+        results = {
+            'MSE': np.inf,
+            'MAE': np.inf,
+            'RMSE': np.inf,
+            'R2': -np.inf,
+            'MAPE': np.inf,
+            'Prediction_Time': np.inf
+        }
+        
+        # Add NaN hierarchical metrics if requested
+        if entities_test is not None and hierarchy is not None:
+            for rank in range(4):
+                results[f'Rank_{rank}_WAPE'] = np.nan
+                results[f'Rank_{rank}_R2'] = np.nan
+                results[f'Rank_{rank}_MAE'] = np.nan
+                results[f'Rank_{rank}_RMSE'] = np.nan
+        
+        return results
+
+
 def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.DataFrame:
     """
     Run comprehensive baseline comparison.
@@ -239,7 +438,12 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
                 eval_kwargs['dates'] = val_dates
                 eval_kwargs['entity_ids'] = entities_val
             
-            val_metrics = evaluate_model(model, X_val, y_val, **eval_kwargs)
+            val_metrics = evaluate_model(
+                model, X_val, y_val, 
+                entities_test=entities_val, 
+                hierarchy=hierarchy, 
+                **eval_kwargs
+            )
             
             # Evaluate on test set
             eval_kwargs['entity_levels'] = levels_test
@@ -248,7 +452,12 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
                 eval_kwargs['dates'] = test_dates
                 eval_kwargs['entity_ids'] = entities_test
             
-            test_metrics = evaluate_model(model, X_test, y_test, **eval_kwargs)
+            test_metrics = evaluate_model(
+                model, X_test, y_test, 
+                entities_test=entities_test, 
+                hierarchy=hierarchy, 
+                **eval_kwargs
+            )
             
             # Store results
             result = {
@@ -444,6 +653,50 @@ def main():
     
     for _, row in results_df.head(10).iterrows():
         print(f"{row['Model']:<25} {row['Test_R2']:<10.4f} {row['Test_RMSE']:<12.2f} {row['Training_Time']:<15.1f}s")
+    
+    # Print hierarchical results for top 3 models
+    print("\n" + "="*80)
+    print("HIERARCHICAL PERFORMANCE COMPARISON (Top 3 Models)")
+    print("="*80)
+    
+    # Check if hierarchical metrics are available
+    hierarchical_cols = [col for col in results_df.columns if 'Rank_' in col and '_WAPE' in col]
+    if hierarchical_cols:
+        for i, (_, row) in enumerate(results_df.head(3).iterrows()):
+            print(f"\n{row['Model']}:")
+            print(f"{'Level':<8} {'WAPE':<10} {'R²':<8} {'MAE':<10} {'RMSE':<10}")
+            print("-" * 50)
+            
+            for rank in range(4):
+                wape = row.get(f'Rank_{rank}_WAPE', np.nan)
+                r2 = row.get(f'Rank_{rank}_R2', np.nan)
+                mae = row.get(f'Rank_{rank}_MAE', np.nan)
+                rmse = row.get(f'Rank_{rank}_RMSE', np.nan)
+                
+                if not np.isnan(wape):
+                    print(f"Rank {rank:<3} {wape*100:<10.2f}% {r2:<8.3f} {mae:<10.2f} {rmse:<10.2f}")
+                else:
+                    print(f"Rank {rank:<3} {'N/A':<10} {'N/A':<8} {'N/A':<10} {'N/A':<10}")
+    else:
+        print("Hierarchical metrics not available (entities_test or hierarchy data missing)")
+    
+    # Add CCMPN comparison reference
+    print(f"\n" + "="*80)
+    print("CCMPN MODEL REFERENCE (Your Results)")
+    print("="*80)
+    print(f"{'Level':<8} {'WAPE':<10} {'R²':<8} {'MAE':<10} {'RMSE':<10}")
+    print("-" * 50)
+    ccmpn_results = [
+        (0, 12.82, 0.970, 16.14, 27.95),
+        (1, 8.52, 0.975, 31.92, 44.91),
+        (2, 5.48, 0.910, 605.47, 830.73),
+        (3, 5.48, 0.910, 605.47, 830.73)
+    ]
+    for rank, wape, r2, mae, rmse in ccmpn_results:
+        print(f"Rank {rank:<3} {wape:<10.2f}% {r2:<8.3f} {mae:<10.2f} {rmse:<10.2f}")
+    
+    print("\nYour CCMPN model shows excellent performance across all hierarchy levels!")
+    print("Compare these results with the baseline models above.")
     
     if args.visualize:
         print("\nCreating visualizations...")

@@ -104,12 +104,19 @@ class DataPreprocessor:
         """Create additional features for the model."""
         df = df.copy()
         
-        # Time-based features
+        # Handle date features - check if date is in index or columns
+        date_col = None
         if isinstance(df.index, pd.DatetimeIndex):
-            df['day_of_week'] = df.index.dayofweek
-            df['month'] = df.index.month
-            df['quarter'] = df.index.quarter
-            df['day_of_year'] = df.index.dayofyear
+            date_col = df.index
+        elif 'date' in df.columns:
+            date_col = pd.to_datetime(df['date'])
+        
+        # Time-based features
+        if date_col is not None:
+            df['day_of_week'] = date_col.dayofweek
+            df['month'] = date_col.month
+            df['quarter'] = date_col.quarter
+            df['day_of_year'] = date_col.dayofyear
             
             # Cyclical encoding
             df['day_of_week_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
@@ -117,16 +124,16 @@ class DataPreprocessor:
             df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
             df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
         
-        # Simple lag features (without groupby to avoid index issues)
-        df_sorted = df.sort_index()
-        for lag in [1, 7]:
-            df[f'target_lag_{lag}'] = df_sorted['target'].shift(lag)
-        
-        # Update feature columns
-        self.feature_columns = [
-            col for col in df.columns 
-            if col not in ['target', 'companyID', 'storeID', 'skuID']
-        ]
+        # Simple lag features (ensure target exists)
+        if 'target' in df.columns:
+            df_sorted = df.sort_values('date') if 'date' in df.columns else df.sort_index()
+            for lag in [1, 7]:
+                df[f'target_lag_{lag}'] = df_sorted['target'].shift(lag)
+            
+            # Fill NaN lag values with 0
+            lag_cols = [col for col in df.columns if 'target_lag_' in col]
+            for col in lag_cols:
+                df[col] = df[col].fillna(0)
         
         return df
     
@@ -219,20 +226,44 @@ class DataPreprocessor:
             df: Input DataFrame
             
         Returns:
-            DataFrame with created features
+            DataFrame with created features and proper entity_id
         """
-        df_with_features = self._create_features(df)
+        # Make a copy to avoid modifying original
+        df_copy = df.copy()
+        
+        # Reset index if it's a DatetimeIndex to access date as column
+        if isinstance(df_copy.index, pd.DatetimeIndex):
+            df_copy = df_copy.reset_index()
         
         # Create entity_id column for baseline comparison
-        if 'companyID' in df_with_features.columns and 'storeID' in df_with_features.columns and 'skuID' in df_with_features.columns:
-            # Reset index to access companyID, storeID, skuID if they're in the index
-            if isinstance(df_with_features.index, pd.DatetimeIndex):
-                df_reset = df_with_features.reset_index()
-            else:
-                df_reset = df_with_features.copy()
-            
+        if all(col in df_copy.columns for col in ['companyID', 'storeID', 'skuID']):
             # Create entity_id as tuple of (companyID, storeID, skuID)
-            df_with_features['entity_id'] = list(df_reset[['companyID', 'storeID', 'skuID']].apply(tuple, axis=1))
+            df_copy['entity_id'] = list(df_copy[['companyID', 'storeID', 'skuID']].apply(tuple, axis=1))
+        
+        # Apply feature engineering
+        df_with_features = self._create_features(df_copy)
+        
+        # Ensure only numeric features are included (exclude date, IDs, etc.)
+        exclude_cols = ['date', 'companyID', 'storeID', 'skuID', 'target', 'entity_id']
+        numeric_feature_cols = []
+        
+        for col in df_with_features.columns:
+            if col not in exclude_cols:
+                # Try to convert to numeric
+                try:
+                    df_with_features[col] = pd.to_numeric(df_with_features[col], errors='coerce')
+                    # If conversion was successful and has no NaN, include it
+                    if not df_with_features[col].isna().all():
+                        numeric_feature_cols.append(col)
+                except:
+                    continue
+        
+        # Update feature columns to only include numeric features
+        self.feature_columns = numeric_feature_cols
+        
+        # Fill any NaN values in features with 0
+        for col in self.feature_columns:
+            df_with_features[col] = df_with_features[col].fillna(0)
         
         return df_with_features
 
