@@ -200,20 +200,47 @@ def aggregate_predictions(predictions: torch.Tensor, actuals: torch.Tensor,
     """
     results = {}
     
+    # Convert to numpy for easier handling
+    pred_np = predictions.detach().cpu().numpy()
+    actual_np = actuals.detach().cpu().numpy()
+    
     for rank in sorted(cc.cells.keys()):
-        cell_indices = [cc.cell_to_int[c] for c in cc.cells[rank]]
+        if rank not in cc.cells or len(cc.cells[rank]) == 0:
+            continue
+            
+        cell_indices = []
+        for cell in cc.cells[rank]:
+            if cell in cc.cell_to_int:
+                cell_indices.append(cc.cell_to_int[cell])
         
-        if rank == 0:  # SKU level - individual forecasts
-            rank_preds = predictions[:, cell_indices].detach().numpy().flatten()
-            rank_actuals = actuals[:, cell_indices].detach().numpy().flatten()
-        else:  # Higher levels - sum over constituent cells
-            rank_preds = predictions[:, cell_indices].detach().numpy().sum(axis=1)
-            rank_actuals = actuals[:, cell_indices].detach().numpy().sum(axis=1)
+        if not cell_indices:
+            continue
+            
+        # Get predictions and actuals for this rank
+        if pred_np.ndim == 3:  # Shape: (batch, cells, features)
+            rank_preds = pred_np[:, cell_indices, :].reshape(-1)
+            rank_actuals = actual_np[:, cell_indices, :].reshape(-1)
+        elif pred_np.ndim == 2:  # Shape: (batch, cells) or (cells, features)
+            if pred_np.shape[0] == len(predictions):  # (batch, cells)
+                rank_preds = pred_np[:, cell_indices].reshape(-1)
+                rank_actuals = actual_np[:, cell_indices].reshape(-1)
+            else:  # (cells, features)
+                rank_preds = pred_np[cell_indices, :].reshape(-1)
+                rank_actuals = actual_np[cell_indices, :].reshape(-1)
+        else:  # 1D
+            rank_preds = pred_np[cell_indices]
+            rank_actuals = actual_np[cell_indices]
         
-        results[rank] = {
-            'predictions': rank_preds,
-            'actuals': rank_actuals
-        }
+        # Remove NaN and inf values
+        mask = np.isfinite(rank_preds) & np.isfinite(rank_actuals)
+        rank_preds = rank_preds[mask]
+        rank_actuals = rank_actuals[mask]
+        
+        if len(rank_preds) > 0 and len(rank_actuals) > 0:
+            results[rank] = {
+                'predictions': rank_preds,
+                'actuals': rank_actuals
+            }
     
     return results
 

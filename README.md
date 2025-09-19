@@ -60,8 +60,8 @@ HierarchicalForecasting/
 
 ### From Source
 ```bash
-git clone <repository-url>
-cd HierarchicalForecasting
+git clone https://github.com/YOUR_USERNAME/hierarchical-forecasting.git
+cd hierarchical-forecasting
 pip install -r requirements.txt
 pip install -e .
 ```
@@ -185,6 +185,21 @@ make visualize
 ## Contributing
 
 Please read [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
+
+## GitHub Setup
+
+This project is ready to be pushed to GitHub. To set up your repository:
+
+1. **Create a new repository** on GitHub (don't initialize with README/gitignore/license)
+2. **Add remote origin**: `git remote add origin https://github.com/YOUR_USERNAME/REPO_NAME.git`
+3. **Push to GitHub**: `git push -u origin main`
+
+The project includes:
+- ✅ Complete `.gitignore` for Python/ML projects
+- ✅ Professional package structure
+- ✅ Initial commit with all files
+- ✅ MIT License and documentation
+- ✅ Ready for collaborative development
 
 ## License
 
