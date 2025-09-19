@@ -178,8 +178,38 @@ class DataPreprocessor:
             'missing_values': df.isnull().sum().sum()
         }
         return stats
-
-
+    
+    def create_hierarchy(self, df: pd.DataFrame) -> Dict:
+        """
+        Create hierarchy dictionary for baseline models.
+        
+        Args:
+            df: DataFrame with hierarchical sales data
+            
+        Returns:
+            Dictionary mapping hierarchy levels to entity groups
+        """
+        hierarchy = {}
+        
+        # Reset index to access date column if it's the index
+        if isinstance(df.index, pd.DatetimeIndex):
+            df_reset = df.reset_index()
+        else:
+            df_reset = df.copy()
+        
+        # Level 0: Individual SKUs (companyID, storeID, skuID)
+        hierarchy[0] = list(df_reset[['companyID', 'storeID', 'skuID']].drop_duplicates().apply(tuple, axis=1))
+        
+        # Level 1: Stores (companyID, storeID)
+        hierarchy[1] = list(df_reset[['companyID', 'storeID']].drop_duplicates().apply(tuple, axis=1))
+        
+        # Level 2: Companies (companyID,)
+        hierarchy[2] = list(df_reset[['companyID']].drop_duplicates().apply(tuple, axis=1))
+        
+        # Level 3: Total (single aggregate)
+        hierarchy[3] = [('total',)]
+        
+        return hierarchy
 def load_and_merge_data(features_path: str, targets_path: str) -> pd.DataFrame:
     """
     Load and merge bakery features and targets data.

@@ -113,6 +113,9 @@ class HierarchicalDataLoader:
                     day_features[cell_idx] = torch.tensor(feature_values, dtype=torch.float32)
                     day_target[cell_idx] = torch.tensor([target_value], dtype=torch.float32)
             
+            # Aggregate targets for higher-level cells
+            self._populate_hierarchical_targets(day_target, day_data)
+            
             daily_data.append((day_features, day_target))
         
         print(f"✅ Daily tensors prepared: {len(daily_data)} days")
@@ -183,6 +186,44 @@ class HierarchicalDataLoader:
         )
         
         return train_loader, val_loader
+    
+    def _populate_hierarchical_targets(self, day_target: torch.Tensor, day_data: pd.DataFrame):
+        """
+        Populate higher-level cells with aggregated target values.
+        
+        Args:
+            day_target: Target tensor to populate
+            day_data: DataFrame with SKU-level data for this day
+        """
+        # For each hierarchy level > 0, aggregate from constituent SKUs
+        for rank in [1, 2, 3]:
+            for cell in self.cc.cells[rank]:
+                if cell in self.cc.cell_to_int:
+                    cell_idx = self.cc.cell_to_int[cell]
+                    
+                    # Find constituent SKUs and sum their targets
+                    total_target = 0.0
+                    for _, row in day_data.iterrows():
+                        sku_cell = (row['companyID'], row['storeID'], row['skuID'])
+                        if self._is_sku_constituent(sku_cell, cell, rank):
+                            try:
+                                target_value = float(row['target'])
+                                if not np.isnan(target_value):
+                                    total_target += target_value
+                            except (ValueError, TypeError):
+                                pass
+                    
+                    day_target[cell_idx] = torch.tensor([total_target], dtype=torch.float32)
+    
+    def _is_sku_constituent(self, sku_cell, higher_cell, rank):
+        """Check if a SKU cell is a constituent of a higher-level cell."""
+        if rank == 1:  # Store level: (companyID, storeID)
+            return sku_cell[0] == higher_cell[0] and sku_cell[1] == higher_cell[1]
+        elif rank == 2:  # Company level: (companyID,)
+            return sku_cell[0] == higher_cell[0]
+        elif rank == 3:  # Total level: ('total',)
+            return True  # All SKUs belong to total
+        return False
 
 
 def aggregate_predictions(predictions: torch.Tensor, actuals: torch.Tensor,
