@@ -90,13 +90,28 @@ class HierarchicalDataLoader:
                 if cell_id in self.cc.cell_to_int:
                     cell_idx = self.cc.cell_to_int[cell_id]
                     
+                    # Get feature values and ensure they're numeric
+                    feature_values = row[feature_columns].values
+                    
+                    # Convert to float32 and handle any remaining non-numeric values
+                    try:
+                        feature_values = pd.to_numeric(feature_values, errors='coerce')
+                        feature_values = np.nan_to_num(feature_values, nan=0.0).astype(np.float32)
+                    except (ValueError, TypeError):
+                        # If conversion fails, create zero vector
+                        feature_values = np.zeros(len(feature_columns), dtype=np.float32)
+                    
+                    # Get target value and ensure it's numeric
+                    try:
+                        target_value = float(row['target'])
+                        if np.isnan(target_value):
+                            target_value = 0.0
+                    except (ValueError, TypeError):
+                        target_value = 0.0
+                    
                     # Set features and target for this cell
-                    day_features[cell_idx] = torch.tensor(
-                        row[feature_columns].values, dtype=torch.float32
-                    )
-                    day_target[cell_idx] = torch.tensor(
-                        [row['target']], dtype=torch.float32
-                    )
+                    day_features[cell_idx] = torch.tensor(feature_values, dtype=torch.float32)
+                    day_target[cell_idx] = torch.tensor([target_value], dtype=torch.float32)
             
             daily_data.append((day_features, day_target))
         

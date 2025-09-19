@@ -81,6 +81,14 @@ class DataPreprocessor:
     
     def _handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
         """Handle missing values in the dataset."""
+        # Convert all feature columns to numeric, coercing errors to NaN
+        for col in self.feature_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Ensure target is numeric
+        df['target'] = pd.to_numeric(df['target'], errors='coerce')
+        
         # Forward fill missing values for time series
         df = df.fillna(method='ffill')
         

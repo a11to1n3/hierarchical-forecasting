@@ -50,7 +50,7 @@ def load_data(data_path):
     except FileNotFoundError:
         print(f"❌ Data file {data_path} not found.")
         print("Creating dummy data for demonstration...")
-        from data.preprocessing import create_dummy_data
+        from hierarchical_forecasting.data.preprocessing import create_dummy_data
         return create_dummy_data()
 
 
