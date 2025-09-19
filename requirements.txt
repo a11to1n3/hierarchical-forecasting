@@ -1,0 +1,18 @@
+pandas>=1.5.0
+numpy>=1.21.0
+torch>=2.0.0
+scikit-learn>=1.2.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+networkx>=2.8.0
+plotly>=5.0.0
+statsmodels>=0.13.0
+scipy>=1.9.0
+
+# Optional dependencies for specific baselines
+# Install with: pip install prophet
+prophet>=1.1.0  # For Prophet baseline (optional)
+
+# Development and testing dependencies
+pytest>=7.0.0
+pytest-cov>=4.0.0
