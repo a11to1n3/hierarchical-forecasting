@@ -222,6 +222,47 @@ class DataPreprocessor:
             DataFrame with created features
         """
         return self._create_features(df)
+
+    def split_data(self, df: pd.DataFrame, test_period: int = 30, val_period: int = 30):
+        """
+        Split data into train, validation, and test sets chronologically.
+        
+        Args:
+            df: Input DataFrame with date index
+            test_period: Number of days for test set
+            val_period: Number of days for validation set
+            
+        Returns:
+            Tuple of (train_data, val_data, test_data)
+        """
+        # Get unique dates and sort them
+        unique_dates = sorted(df.index.unique())
+        total_days = len(unique_dates)
+        
+        if test_period + val_period >= total_days:
+            raise ValueError("Test and validation periods are too large for the dataset")
+        
+        # Split chronologically
+        train_end_idx = total_days - test_period - val_period
+        val_end_idx = total_days - test_period
+        
+        train_dates = unique_dates[:train_end_idx]
+        val_dates = unique_dates[train_end_idx:val_end_idx]
+        test_dates = unique_dates[val_end_idx:]
+        
+        # Split dataframes
+        train_data = df[df.index.isin(train_dates)]
+        val_data = df[df.index.isin(val_dates)]
+        test_data = df[df.index.isin(test_dates)]
+        
+        print(f"📊 Data split:")
+        print(f"  - Training: {len(train_data)} samples ({len(train_dates)} days)")
+        print(f"  - Validation: {len(val_data)} samples ({len(val_dates)} days)")
+        print(f"  - Test: {len(test_data)} samples ({len(test_dates)} days)")
+        
+        return train_data, val_data, test_data
+
+
 def load_and_merge_data(features_path: str, targets_path: str) -> pd.DataFrame:
     """
     Load and merge bakery features and targets data.
@@ -268,45 +309,6 @@ def load_and_merge_data(features_path: str, targets_path: str) -> pd.DataFrame:
     except Exception as e:
         print(f"❌ Error loading data: {e}")
         raise
-
-    def split_data(self, df: pd.DataFrame, test_period: int = 30, val_period: int = 30):
-        """
-        Split data into train, validation, and test sets chronologically.
-        
-        Args:
-            df: Input DataFrame with date index
-            test_period: Number of days for test set
-            val_period: Number of days for validation set
-            
-        Returns:
-            Tuple of (train_data, val_data, test_data)
-        """
-        # Get unique dates and sort them
-        unique_dates = sorted(df.index.unique())
-        total_days = len(unique_dates)
-        
-        if test_period + val_period >= total_days:
-            raise ValueError("Test and validation periods are too large for the dataset")
-        
-        # Split chronologically
-        train_end_idx = total_days - test_period - val_period
-        val_end_idx = total_days - test_period
-        
-        train_dates = unique_dates[:train_end_idx]
-        val_dates = unique_dates[train_end_idx:val_end_idx]
-        test_dates = unique_dates[val_end_idx:]
-        
-        # Split dataframes
-        train_data = df[df.index.isin(train_dates)]
-        val_data = df[df.index.isin(val_dates)]
-        test_data = df[df.index.isin(test_dates)]
-        
-        print(f"📊 Data split:")
-        print(f"  - Training: {len(train_data)} samples ({len(train_dates)} days)")
-        print(f"  - Validation: {len(val_data)} samples ({len(val_dates)} days)")
-        print(f"  - Test: {len(test_data)} samples ({len(test_dates)} days)")
-        
-        return train_data, val_data, test_data
 
 
 def create_dummy_data(n_companies: int = 1, n_stores: int = 10, 
