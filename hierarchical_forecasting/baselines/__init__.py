@@ -13,7 +13,7 @@ from .lstm import LSTMBaseline, MultiEntityLSTM
 from .prophet_baseline import ProphetBaseline, HierarchicalProphet
 from .hierarchical_methods import BottomUpBaseline, TopDownBaseline, MiddleOutBaseline
 from .mint import MinTBaseline, OLSBaseline
-from .etnn_baseline import ETNNBaseline, SimplifiedETNNBaseline
+from .etnn_baseline import ETNNBaseline
 from .transformer_baselines import (
     PatchTSTBaseline,
     TimesNetBaseline,
@@ -36,7 +36,6 @@ __all__ = [
     'MinTBaseline',
     'OLSBaseline',
     'ETNNBaseline',
-    'SimplifiedETNNBaseline',
     'PatchTSTBaseline',
     'TimesNetBaseline'
 ]

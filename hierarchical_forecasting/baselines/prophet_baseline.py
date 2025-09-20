@@ -76,20 +76,23 @@ class ProphetBaseline(BaselineModel):
             entity_ids = np.zeros(len(y))
         
         # Train separate Prophet model for each entity
+        entity_ids = np.asarray(entity_ids)
         unique_entities = np.unique(entity_ids)
         
         for entity in unique_entities:
             entity_mask = entity_ids == entity
-            entity_dates = dates[entity_mask]
+            entity_dates = pd.to_datetime(dates[entity_mask])
             entity_y = y[entity_mask]
             
-            if len(entity_y) >= 2:  # Prophet needs at least 2 data points
+            df = pd.DataFrame({
+                'ds': entity_dates,
+                'y': entity_y
+            }).sort_values('ds')
+
+            df = df.groupby('ds', as_index=False)['y'].mean()
+
+            if len(df) >= 2:  # Prophet needs at least 2 data points
                 # Prepare data in Prophet format
-                df = pd.DataFrame({
-                    'ds': pd.to_datetime(entity_dates),
-                    'y': entity_y
-                })
-                
                 # Create and fit Prophet model
                 model = Prophet(
                     seasonality_mode=self.seasonality_mode,

@@ -21,6 +21,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from .base import BaselineModel
@@ -38,6 +39,94 @@ def _sinusoidal_embedding(length: int, dim: int, device: torch.device) -> torch.
     pe[:, 0::2] = torch.sin(position * div_term)
     pe[:, 1::2] = torch.cos(position * div_term)
     return pe
+
+
+class PatchEmbedding1D(nn.Module):
+    """Map 1D sequences into overlapping patch embeddings."""
+
+    def __init__(self, seq_len: int, patch_len: int, stride: int, d_model: int) -> None:
+        super().__init__()
+        self.patch_len = patch_len
+        self.stride = stride
+        self.d_model = d_model
+
+        effective_len = max(seq_len, patch_len)
+        if effective_len > patch_len and stride > 0:
+            remainder = (effective_len - patch_len) % stride
+            if remainder:
+                effective_len += stride - remainder
+        self.effective_len = effective_len
+        patch_count = 1 if stride <= 0 else 1 + max(0, (effective_len - patch_len) // stride)
+        self.proj = nn.Linear(patch_len, d_model)
+        self.position = nn.Parameter(torch.randn(1, patch_count, d_model) * 0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [batch, seq_len]
+        if x.dim() != 2:
+            raise ValueError("PatchEmbedding1D expects input shape [batch, seq_len].")
+
+        seq_len = x.size(1)
+        if seq_len < self.patch_len:
+            pad = self.patch_len - seq_len
+            x = F.pad(x, (0, pad))
+            seq_len = self.patch_len
+
+        if seq_len < self.effective_len:
+            x = F.pad(x, (0, self.effective_len - seq_len))
+
+        patches = x.unfold(dimension=1, size=self.patch_len, step=max(self.stride, 1))
+        patches = patches.contiguous()  # [batch, num_patches, patch_len]
+        embeddings = self.proj(patches)
+        if embeddings.size(1) != self.position.size(1):
+            pos = F.interpolate(
+                self.position.detach().permute(0, 2, 1),
+                size=embeddings.size(1),
+                mode='linear',
+                align_corners=False,
+            ).permute(0, 2, 1)
+        else:
+            pos = self.position
+        return embeddings + pos
+
+
+class PatchTSTRegressor(nn.Module):
+    """Lightweight PatchTST-style regressor for univariate forecasting."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        patch_len: int,
+        stride: int,
+        d_model: int,
+        nhead: int,
+        num_layers: int,
+        dropout: float,
+    ) -> None:
+        super().__init__()
+        self.patch_embed = PatchEmbedding1D(input_dim, patch_len, stride, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=d_model * 4,
+            dropout=dropout,
+            batch_first=True,
+            activation='gelu',
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.norm = nn.LayerNorm(d_model)
+        self.head = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        tokens = self.patch_embed(x)
+        encoded = self.encoder(tokens)
+        pooled = encoded.mean(dim=1)
+        pooled = self.norm(pooled)
+        return self.head(pooled)
 
 
 # ---------------------------------------------------------------------------
@@ -369,13 +458,24 @@ class TimesNetBaseline(BaselineModel):
 
         self.model: Optional[TimesNetForecaster] = None
         self.seq_len: Optional[int] = None
+        self.feature_scaler: Optional[StandardScaler] = None
+        self.target_scaler: Optional[StandardScaler] = None
 
     def fit(self, X: np.ndarray, y: np.ndarray,
             hierarchy: Optional[dict] = None, **kwargs) -> 'TimesNetBaseline':
         if X.ndim != 2:
             raise ValueError("TimesNetBaseline expects 2D input [n_samples, seq_len].")
 
-        self.seq_len = X.shape[1]
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.float32).reshape(-1, 1)
+
+        self.feature_scaler = StandardScaler()
+        self.target_scaler = StandardScaler()
+
+        X_scaled = self.feature_scaler.fit_transform(X).astype(np.float32)
+        y_scaled = self.target_scaler.fit_transform(y).astype(np.float32).squeeze(-1)
+
+        self.seq_len = X_scaled.shape[1]
         cfg = TimesNetConfig(
             seq_len=self.seq_len,
             pred_len=1,
@@ -390,8 +490,8 @@ class TimesNetBaseline(BaselineModel):
         self.model = TimesNetForecaster(cfg).to(self.device)
 
         dataset = TensorDataset(
-            torch.from_numpy(X.astype(np.float32)),
-            torch.from_numpy(y.astype(np.float32)),
+            torch.from_numpy(X_scaled),
+            torch.from_numpy(y_scaled),
         )
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
@@ -428,8 +528,17 @@ class TimesNetBaseline(BaselineModel):
         if not self.is_fitted or self.model is None:
             raise ValueError("TimesNetBaseline must be fitted before prediction.")
 
-        features = torch.from_numpy(X.astype(np.float32)).to(self.device).unsqueeze(-1)
+        X = np.asarray(X, dtype=np.float32)
+        if self.feature_scaler is not None:
+            X_scaled = self.feature_scaler.transform(X).astype(np.float32)
+        else:
+            X_scaled = X.astype(np.float32)
+
+        features = torch.from_numpy(X_scaled).to(self.device).unsqueeze(-1)
         self.model.eval()
         with torch.no_grad():
             preds = self.model(features)
-        return preds.squeeze(-1).cpu().numpy().reshape(-1)
+        outputs = preds.squeeze(-1).cpu().numpy().reshape(-1, 1)
+        if self.target_scaler is not None:
+            outputs = self.target_scaler.inverse_transform(outputs)
+        return outputs.ravel()

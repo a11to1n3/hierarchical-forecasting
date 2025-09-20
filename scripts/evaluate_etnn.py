@@ -27,7 +27,7 @@ from hierarchical_forecasting.models import (
     CombinatorialComplex, ModelConfig, ETNNEnhancedHierarchicalModel
 )
 from hierarchical_forecasting.data import DataPreprocessor, HierarchicalDataLoader
-from hierarchical_forecasting.baselines import ETNNBaseline, SimplifiedETNNBaseline
+from hierarchical_forecasting.baselines import ETNNBaseline
 from hierarchical_forecasting.baselines import PatchTSTBaseline, TimesNetBaseline
 from hierarchical_forecasting.utils import (
     weighted_absolute_percentage_error,
@@ -92,25 +92,15 @@ def create_etnn_models(
             num_layers=2,
             spatial_dim=2,
             use_geometric_features=True,
-            epochs=50
+            epochs=100
         ),
         'ETNN_Deep': ETNNBaseline(
             hidden_dim=64,
             num_layers=4,
             spatial_dim=3,
             use_geometric_features=True,
-            epochs=75
+            epochs=150
         ),
-        'Simplified_ETNN': SimplifiedETNNBaseline(
-            hidden_dim=32,
-            num_layers=3,
-            epochs=50
-        ),
-        'Simplified_ETNN_Large': SimplifiedETNNBaseline(
-            hidden_dim=64,
-            num_layers=4,
-            epochs=75
-        )
     }
 
     if patchtst_checkpoint:

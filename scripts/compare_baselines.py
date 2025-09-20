@@ -28,7 +28,7 @@ from hierarchical_forecasting.baselines import (
     RandomForestBaseline, HierarchicalRandomForest,
     LSTMBaseline, MultiEntityLSTM,
     BottomUpBaseline, TopDownBaseline, MiddleOutBaseline,
-    MinTBaseline, OLSBaseline, ETNNBaseline, SimplifiedETNNBaseline,
+    MinTBaseline, OLSBaseline, ETNNBaseline,
     PatchTSTBaseline, TimesNetBaseline
 )
 from hierarchical_forecasting.utils import (
@@ -72,8 +72,7 @@ def create_baseline_models(input_size: int,
         'Multi_Entity_LSTM': MultiEntityLSTM(input_size=input_size, hidden_size=32, epochs=20),
         
         # ETNN-based baselines (Topological Deep Learning)
-        'ETNN': ETNNBaseline(hidden_dim=32, num_layers=2, epochs=30),
-        'Simplified_ETNN': SimplifiedETNNBaseline(hidden_dim=32, num_layers=2, epochs=30),
+        'ETNN': ETNNBaseline(hidden_dim=32, num_layers=2, epochs=120),
     }
 
     if patchtst_checkpoint:
@@ -127,6 +126,8 @@ def evaluate_model(model, X_test: np.ndarray, y_test: np.ndarray,
         mse = mean_squared_error(y_test, predictions)
         mae = mean_absolute_error(y_test, predictions)
         rmse = np.sqrt(mse)
+        wape = weighted_absolute_percentage_error(y_test, predictions)
+        wase = weighted_absolute_squared_error(y_test, predictions)
         
         # R-squared
         ss_res = np.sum((y_test - predictions) ** 2)
@@ -140,6 +141,8 @@ def evaluate_model(model, X_test: np.ndarray, y_test: np.ndarray,
             'MSE': mse,
             'MAE': mae,
             'RMSE': rmse,
+            'WAPE': wape,
+            'WASE': wase,
             'R2': r2,
             'MAPE': mape,
             'Prediction_Time': prediction_time
@@ -393,12 +396,13 @@ def run_baseline_comparison(
             data = data.set_index('date').sort_index()
     
     preprocessor = DataPreprocessor()
-    
+    processed_data = preprocessor.prepare_data(data)
+
     # Create hierarchy
-    hierarchy = preprocessor.create_hierarchy(data)
-    
+    hierarchy = preprocessor.create_hierarchy(processed_data)
+
     # Split data
-    train_data, val_data, test_data = preprocessor.split_data(data, test_period=30, val_period=30)
+    train_data, val_data, test_data = preprocessor.split_data(processed_data, test_period=30, val_period=30)
     
     print(f"Training samples: {len(train_data)}")
     print(f"Validation samples: {len(val_data)}")
@@ -406,6 +410,13 @@ def run_baseline_comparison(
     
     # Prepare features and targets for each split
     def prepare_split_data(split_data):
+        if isinstance(split_data.index, pd.DatetimeIndex):
+            dates = split_data.index.to_numpy()
+        elif 'date' in split_data.columns:
+            dates = pd.to_datetime(split_data['date']).to_numpy()
+        else:
+            dates = np.arange(len(split_data))
+
         features = preprocessor.create_features(split_data)
         targets = preprocessor.create_targets(split_data)
         
@@ -443,15 +454,19 @@ def run_baseline_comparison(
         # Remove entity_id and non-feature columns for model input
         # Use the feature columns identified by the preprocessor
         feature_columns = [col for col in preprocessor.feature_columns if col in features.columns]
+        if not feature_columns:
+            numeric_cols = features.select_dtypes(include=[np.number]).columns.tolist()
+            feature_columns = [col for col in numeric_cols if col not in {'target', 'entity_id'}]
+
         X = features[feature_columns].values
         y = targets['target'].values
-        
+
         print(f"Selected feature columns: {feature_columns}")
-        return X, y, entity_levels, features['entity_id'].values
-    
-    X_train, y_train, levels_train, entities_train = prepare_split_data(train_data)
-    X_val, y_val, levels_val, entities_val = prepare_split_data(val_data)
-    X_test, y_test, levels_test, entities_test = prepare_split_data(test_data)
+        return X, y, entity_levels, features['entity_id'].values, dates
+
+    X_train, y_train, levels_train, entities_train, dates_train = prepare_split_data(train_data)
+    X_val, y_val, levels_val, entities_val, dates_val = prepare_split_data(val_data)
+    X_test, y_test, levels_test, entities_test, dates_test = prepare_split_data(test_data)
     
     print(f"Feature dimensions: {X_train.shape}")
     
@@ -478,14 +493,12 @@ def run_baseline_comparison(
                 'entity_levels': levels_train,
                 'entity_ids': entities_train
             }
-            
+
             # Special handling for Prophet models
             if 'Prophet' in name:
-                # Create date information for Prophet
-                dates = pd.date_range('2023-01-01', periods=len(X_train), freq='D')
-                train_kwargs['dates'] = dates
+                train_kwargs['dates'] = dates_train
                 train_kwargs['entity_ids'] = entities_train
-            
+
             # Train model
             model.fit(X_train, y_train, **train_kwargs)
             training_time = time.time() - start_time
@@ -493,13 +506,14 @@ def run_baseline_comparison(
             print(f"Training completed in {training_time:.2f} seconds")
             
             # Evaluate on validation set
-            eval_kwargs = {'entity_levels': levels_val}
-            eval_kwargs['entity_ids'] = entities_val
+            eval_kwargs = {
+                'entity_levels': levels_val,
+                'entity_ids': entities_val
+            }
             if 'Prophet' in name:
-                val_dates = pd.date_range('2023-01-01', periods=len(X_val), freq='D')
-                eval_kwargs['dates'] = val_dates
+                eval_kwargs['dates'] = dates_val
                 eval_kwargs['entity_ids'] = entities_val
-            
+
             val_metrics = evaluate_model(
                 model, X_val, y_val, 
                 entities_test=entities_val, 
@@ -511,8 +525,7 @@ def run_baseline_comparison(
             eval_kwargs['entity_levels'] = levels_test
             eval_kwargs['entity_ids'] = entities_test
             if 'Prophet' in name:
-                test_dates = pd.date_range('2023-01-01', periods=len(X_test), freq='D')
-                eval_kwargs['dates'] = test_dates
+                eval_kwargs['dates'] = dates_test
                 eval_kwargs['entity_ids'] = entities_test
             
             test_metrics = evaluate_model(
