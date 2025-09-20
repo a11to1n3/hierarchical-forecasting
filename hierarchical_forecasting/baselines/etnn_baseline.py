@@ -6,6 +6,7 @@ as baseline models following the ICLR 2025 paper concepts.
 """
 
 import math
+import time
 import torch
 import torch.nn as nn
 import numpy as np
@@ -359,7 +360,16 @@ class ETNNBaseline(BaselineModel):
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
         self.model.train()
-        for epoch in range(self.epochs):
+        total_epochs = self.epochs
+        num_batches = len(dataloader)
+        total_samples_dataset = len(dataset)
+        print(
+            f"Training ETNN for {total_epochs} epochs "
+            f"on {total_samples_dataset} samples ({num_batches} batches/epoch)...",
+            flush=True,
+        )
+        start_time = time.time()
+        for epoch in range(total_epochs):
             epoch_loss = 0.0
             total_samples = 0
             for features_batch, targets_batch, entity_batch in dataloader:
@@ -377,9 +387,16 @@ class ETNNBaseline(BaselineModel):
                 epoch_loss += loss.item() * batch_size
                 total_samples += batch_size
 
-            if (epoch + 1) % max(1, self.epochs // 5) == 0:
-                avg_loss = epoch_loss / max(1, total_samples)
-                print(f"ETNN Epoch {epoch + 1}/{self.epochs}, Loss: {avg_loss:.6f}")
+            avg_loss = epoch_loss / max(1, total_samples)
+            elapsed = time.time() - start_time
+            epochs_done = epoch + 1
+            avg_epoch_time = elapsed / epochs_done
+            remaining = max(0.0, (total_epochs - epochs_done) * avg_epoch_time)
+            print(
+                f"ETNN Epoch {epochs_done}/{total_epochs} | Loss: {avg_loss:.6f} "
+                f"| Elapsed: {elapsed:.1f}s | ETA: {remaining:.1f}s",
+                flush=True,
+            )
 
         self.is_fitted = True
         return self
