@@ -20,7 +20,7 @@ class LSTMBaseline(BaselineModel):
     
     def __init__(self, input_size: int, hidden_size: int = 64, num_layers: int = 2,
                  dropout: float = 0.1, learning_rate: float = 0.001,
-                 epochs: int = 100, batch_size: int = 32, device: str = 'auto'):
+                 epochs: int = 120, batch_size: int = 32, device: str = 'auto'):
         """
         Initialize LSTM baseline.
         
@@ -264,7 +264,7 @@ class MultiEntityLSTM(BaselineModel):
     
     def __init__(self, input_size: int, hidden_size: int = 64, 
                  num_layers: int = 2, learning_rate: float = 0.001,
-                 epochs: int = 50, device: str = 'auto'):
+                 epochs: int = 120, device: str = 'auto'):
         """
         Initialize Multi-Entity LSTM.
         
