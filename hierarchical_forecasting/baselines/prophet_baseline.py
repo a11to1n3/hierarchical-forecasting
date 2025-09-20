@@ -4,7 +4,7 @@ Prophet baseline for hierarchical forecasting.
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from .base import BaselineModel
 
 try:
@@ -72,16 +72,21 @@ class ProphetBaseline(BaselineModel):
             raise ValueError("Prophet requires dates for time series modeling")
         
         if entity_ids is None:
-            # Single time series
-            entity_ids = np.zeros(len(y))
-        
+            entity_ids = np.zeros(len(y), dtype=object)
+        else:
+            entity_ids = self._normalise_entities(entity_ids)
+
+        dates = pd.to_datetime(dates).to_numpy()
+
         # Train separate Prophet model for each entity
-        entity_ids = np.asarray(entity_ids)
         unique_entities = np.unique(entity_ids)
         
         for entity in unique_entities:
             entity_mask = entity_ids == entity
-            entity_dates = pd.to_datetime(dates[entity_mask])
+            if not isinstance(entity_mask, np.ndarray) or entity_mask.ndim != 1:
+                entity_mask = np.array([eid == entity for eid in entity_ids], dtype=bool)
+
+            entity_dates = dates[entity_mask]
             entity_y = y[entity_mask]
             
             df = pd.DataFrame({
@@ -112,6 +117,27 @@ class ProphetBaseline(BaselineModel):
         self.is_fitted = True
         return self
     
+    @staticmethod
+    def _normalise_entities(entity_ids: Any) -> np.ndarray:
+        arr = np.asarray(entity_ids, dtype=object)
+        if arr.ndim == 1:
+            normalised = []
+            for item in arr:
+                if isinstance(item, np.ndarray):
+                    item = tuple(item.tolist())
+                elif isinstance(item, list):
+                    item = tuple(item)
+                normalised.append(item)
+            return np.asarray(normalised, dtype=object)
+        else:
+            flattened = []
+            for row in arr:
+                if isinstance(row, np.ndarray):
+                    flattened.append(tuple(row.tolist()))
+                else:
+                    flattened.append(tuple(row))
+            return np.asarray(flattened, dtype=object)
+
     def predict(self, X: np.ndarray, 
                 dates: Optional[np.ndarray] = None,
                 entity_ids: Optional[np.ndarray] = None, **kwargs) -> np.ndarray:
@@ -134,15 +160,21 @@ class ProphetBaseline(BaselineModel):
             raise ValueError("Prophet requires dates for prediction")
         
         if entity_ids is None:
-            entity_ids = np.zeros(len(dates))
-        
+            entity_ids = np.zeros(len(dates), dtype=object)
+        else:
+            entity_ids = self._normalise_entities(entity_ids)
+
+        dates = pd.to_datetime(dates).to_numpy()
+
         predictions = np.zeros(len(dates))
         
         # Make predictions for each entity
         unique_entities = np.unique(entity_ids)
-        
+
         for entity in unique_entities:
             entity_mask = entity_ids == entity
+            if not isinstance(entity_mask, np.ndarray) or entity_mask.ndim != 1:
+                entity_mask = np.array([eid == entity for eid in entity_ids], dtype=bool)
             
             if entity in self.models:
                 entity_dates = dates[entity_mask]
@@ -183,8 +215,10 @@ class ProphetBaseline(BaselineModel):
             raise ValueError("Prophet requires dates for prediction")
         
         if entity_ids is None:
-            entity_ids = np.zeros(len(dates))
-        
+            entity_ids = np.zeros(len(dates), dtype=object)
+        else:
+            entity_ids = self._normalise_entities(entity_ids)
+
         predictions = np.zeros(len(dates))
         lower_bounds = np.zeros(len(dates))
         upper_bounds = np.zeros(len(dates))
@@ -193,6 +227,8 @@ class ProphetBaseline(BaselineModel):
         
         for entity in unique_entities:
             entity_mask = entity_ids == entity
+            if not isinstance(entity_mask, np.ndarray) or entity_mask.ndim != 1:
+                entity_mask = np.array([eid == entity for eid in entity_ids], dtype=bool)
             
             if entity in self.models:
                 entity_dates = dates[entity_mask]
