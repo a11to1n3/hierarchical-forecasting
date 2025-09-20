@@ -13,7 +13,7 @@ import time
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -29,7 +29,11 @@ from hierarchical_forecasting.baselines import (
     LSTMBaseline, MultiEntityLSTM,
     BottomUpBaseline, TopDownBaseline, MiddleOutBaseline,
     MinTBaseline, OLSBaseline, ETNNBaseline, SimplifiedETNNBaseline,
-    TemporalTransformerBaseline, PretrainedTransformerBaseline
+    PatchTSTBaseline, TimesNetBaseline
+)
+from hierarchical_forecasting.utils import (
+    weighted_absolute_percentage_error,
+    weighted_absolute_squared_error,
 )
 
 try:
@@ -43,7 +47,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-def create_baseline_models(input_size: int) -> Dict:
+def create_baseline_models(input_size: int,
+                           patchtst_checkpoint: Optional[str] = None) -> Dict:
     """
     Create all baseline models for comparison.
 
@@ -69,10 +74,16 @@ def create_baseline_models(input_size: int) -> Dict:
         # ETNN-based baselines (Topological Deep Learning)
         'ETNN': ETNNBaseline(hidden_dim=32, num_layers=2, epochs=30),
         'Simplified_ETNN': SimplifiedETNNBaseline(hidden_dim=32, num_layers=2, epochs=30),
-        'Temporal_Transformer': TemporalTransformerBaseline(sequence_length=6, d_model=128, nhead=4, num_layers=3, epochs=40),
-        'Foundation_Transformer': PretrainedTransformerBaseline(sequence_length=6, d_model=256, nhead=8, num_layers=4, epochs=20, freeze_encoder=True),
+    }
 
-        # Hierarchical reconciliation methods
+    if patchtst_checkpoint:
+        baselines['PatchTST'] = PatchTSTBaseline(checkpoint_path=patchtst_checkpoint)
+    else:
+        print("Skipping PatchTST baseline (no checkpoint provided).")
+
+    baselines['TimesNet'] = TimesNetBaseline()
+
+    baselines.update({
         'Bottom_Up_Linear': BottomUpBaseline(base_model='linear'),
         'Bottom_Up_RF': BottomUpBaseline(base_model='random_forest', n_estimators=50),
         'Top_Down_Linear': TopDownBaseline(base_model='linear'),
@@ -81,7 +92,7 @@ def create_baseline_models(input_size: int) -> Dict:
         'MinT_Linear': MinTBaseline(base_model='linear'),
         'MinT_RF': MinTBaseline(base_model='random_forest', n_estimators=50),
         'OLS': OLSBaseline(base_model='linear'),
-    }
+    })
     
     # Add Prophet baselines if available
     if PROPHET_AVAILABLE:
@@ -226,34 +237,33 @@ def evaluate_hierarchical_metrics(model, X_test, y_test, entities_test, hierarch
             
             # Calculate metrics for this level
             if len(level_preds) > 0 and len(level_actuals) > 0:
-                # Filter out zero actuals for WAPE calculation
-                nonzero_mask = level_actuals > 0
-                if nonzero_mask.sum() > 0:
-                    # WAPE (Weighted Absolute Percentage Error)
-                    wape = np.sum(np.abs(level_actuals[nonzero_mask] - level_preds[nonzero_mask])) / np.sum(np.abs(level_actuals[nonzero_mask]))
-                    
-                    # R²
-                    r2 = r2_score(level_actuals[nonzero_mask], level_preds[nonzero_mask])
-                    
-                    # MAE
-                    mae = mean_absolute_error(level_actuals[nonzero_mask], level_preds[nonzero_mask])
-                    
-                    # RMSE
-                    rmse = np.sqrt(mean_squared_error(level_actuals[nonzero_mask], level_preds[nonzero_mask]))
-                    
-                    hierarchical_results[f'Rank_{rank}_WAPE'] = wape
-                    hierarchical_results[f'Rank_{rank}_R2'] = r2
-                    hierarchical_results[f'Rank_{rank}_MAE'] = mae
-                    hierarchical_results[f'Rank_{rank}_RMSE'] = rmse
+                wape = weighted_absolute_percentage_error(level_actuals, level_preds)
+                wase = weighted_absolute_squared_error(level_actuals, level_preds)
+
+                # Determine mask for metrics that need more than one sample
+                nonzero_mask = np.abs(level_actuals) > 0
+                valid_indices = np.where(nonzero_mask)[0]
+
+                if valid_indices.size > 0:
+                    y_true_valid = level_actuals[valid_indices]
+                    y_pred_valid = level_preds[valid_indices]
+
+                    r2 = r2_score(y_true_valid, y_pred_valid)
+                    mae = mean_absolute_error(y_true_valid, y_pred_valid)
+                    rmse = np.sqrt(mean_squared_error(y_true_valid, y_pred_valid))
                 else:
-                    # No valid data for this rank
-                    hierarchical_results[f'Rank_{rank}_WAPE'] = np.nan
-                    hierarchical_results[f'Rank_{rank}_R2'] = np.nan
-                    hierarchical_results[f'Rank_{rank}_MAE'] = np.nan
-                    hierarchical_results[f'Rank_{rank}_RMSE'] = np.nan
+                    r2 = np.nan
+                    mae = np.nan
+                    rmse = np.nan
+
+                hierarchical_results[f'Rank_{rank}_WAPE'] = wape
+                hierarchical_results[f'Rank_{rank}_WASE'] = wase
+                hierarchical_results[f'Rank_{rank}_R2'] = r2
+                hierarchical_results[f'Rank_{rank}_MAE'] = mae
+                hierarchical_results[f'Rank_{rank}_RMSE'] = rmse
             else:
-                # No data for this rank
                 hierarchical_results[f'Rank_{rank}_WAPE'] = np.nan
+                hierarchical_results[f'Rank_{rank}_WASE'] = np.nan
                 hierarchical_results[f'Rank_{rank}_R2'] = np.nan
                 hierarchical_results[f'Rank_{rank}_MAE'] = np.nan
                 hierarchical_results[f'Rank_{rank}_RMSE'] = np.nan
@@ -266,6 +276,7 @@ def evaluate_hierarchical_metrics(model, X_test, y_test, entities_test, hierarch
         hierarchical_results = {}
         for rank in range(4):
             hierarchical_results[f'Rank_{rank}_WAPE'] = np.nan
+            hierarchical_results[f'Rank_{rank}_WASE'] = np.nan
             hierarchical_results[f'Rank_{rank}_R2'] = np.nan
             hierarchical_results[f'Rank_{rank}_MAE'] = np.nan
             hierarchical_results[f'Rank_{rank}_RMSE'] = np.nan
@@ -292,25 +303,26 @@ def evaluate_model(model, X_test, y_test, entities_test=None, hierarchy=None, **
         predictions = model.predict(X_test, **kwargs)
         prediction_time = time.time() - start_time
         
-        # Calculate basic metrics
         mse = mean_squared_error(y_test, predictions)
         mae = mean_absolute_error(y_test, predictions)
         rmse = np.sqrt(mse)
-        
-        # R-squared
+
         ss_res = np.sum((y_test - predictions) ** 2)
         ss_tot = np.sum((y_test - np.mean(y_test)) ** 2)
         r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
-        
-        # MAPE (avoiding division by zero)
+
         mape = np.mean(np.abs((y_test - predictions) / np.where(y_test == 0, 1, y_test))) * 100
-        
+        wape = weighted_absolute_percentage_error(y_test, predictions)
+        wase = weighted_absolute_squared_error(y_test, predictions)
+
         results = {
             'MSE': mse,
             'MAE': mae,
             'RMSE': rmse,
             'R2': r2,
             'MAPE': mape,
+            'WAPE': wape,
+            'WASE': wase,
             'Prediction_Time': prediction_time
         }
         
@@ -331,6 +343,8 @@ def evaluate_model(model, X_test, y_test, entities_test=None, hierarchy=None, **
             'RMSE': np.inf,
             'R2': -np.inf,
             'MAPE': np.inf,
+            'WAPE': np.inf,
+            'WASE': np.inf,
             'Prediction_Time': np.inf
         }
         
@@ -345,13 +359,19 @@ def evaluate_model(model, X_test, y_test, entities_test=None, hierarchy=None, **
         return results
 
 
-def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.DataFrame:
+def run_baseline_comparison(
+    data_path: str,
+    output_dir: str = "outputs",
+    patchtst_checkpoint: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Run comprehensive baseline comparison.
     
     Args:
         data_path: Path to the data file
         output_dir: Output directory for results
+        patchtst_checkpoint: Optional path to a pre-trained PatchTST checkpoint
+        timesfm_checkpoint: Optional path to a pre-trained TimesFM checkpoint
         
     Returns:
         DataFrame with comparison results
@@ -437,7 +457,10 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
     
     # Create baseline models with the correct input dimensionality
     input_size = X_train.shape[1]
-    baselines = create_baseline_models(input_size)
+    baselines = create_baseline_models(
+        input_size,
+        patchtst_checkpoint=patchtst_checkpoint,
+    )
     
     results = []
     
@@ -506,11 +529,15 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
                 'Val_MSE': val_metrics['MSE'],
                 'Val_MAE': val_metrics['MAE'],
                 'Val_R2': val_metrics['R2'],
+                'Val_WAPE': val_metrics.get('WAPE', np.nan),
+                'Val_WASE': val_metrics.get('WASE', np.nan),
                 'Test_MSE': test_metrics['MSE'],
                 'Test_MAE': test_metrics['MAE'],
                 'Test_RMSE': test_metrics['RMSE'],
                 'Test_R2': test_metrics['R2'],
                 'Test_MAPE': test_metrics['MAPE'],
+                'Test_WAPE': test_metrics.get('WAPE', np.nan),
+                'Test_WASE': test_metrics.get('WASE', np.nan),
                 'Prediction_Time': test_metrics['Prediction_Time']
             }
             
@@ -527,11 +554,15 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
                 'Val_MSE': np.inf,
                 'Val_MAE': np.inf,
                 'Val_R2': -np.inf,
+                'Val_WAPE': np.inf,
+                'Val_WASE': np.inf,
                 'Test_MSE': np.inf,
                 'Test_MAE': np.inf,
                 'Test_RMSE': np.inf,
                 'Test_R2': -np.inf,
                 'Test_MAPE': np.inf,
+                'Test_WAPE': np.inf,
+                'Test_WASE': np.inf,
                 'Prediction_Time': np.inf
             }
             results.append(failed_result)
@@ -677,12 +708,18 @@ def main():
                        help='Output directory for results')
     parser.add_argument('--visualize', action='store_true',
                        help='Create visualization plots')
+    parser.add_argument('--patchtst_checkpoint', type=str, default=None,
+                       help='Path to a TorchScript/state checkpoint for an official PatchTST model')
     
     args = parser.parse_args()
     
     # Run baseline comparison
     print("Starting baseline comparison...")
-    results_df = run_baseline_comparison(args.data_path, args.output_dir)
+    results_df = run_baseline_comparison(
+        args.data_path,
+        args.output_dir,
+        patchtst_checkpoint=args.patchtst_checkpoint,
+    )
     
     # Print summary
     print("\n" + "="*80)
@@ -700,23 +737,24 @@ def main():
     print("="*80)
     
     # Check if hierarchical metrics are available
-    hierarchical_cols = [col for col in results_df.columns if 'Rank_' in col and '_WAPE' in col]
+    hierarchical_cols = [col for col in results_df.columns if 'Rank_' in col and ('_WAPE' in col or '_WASE' in col)]
     if hierarchical_cols:
         for i, (_, row) in enumerate(results_df.head(3).iterrows()):
             print(f"\n{row['Model']}:")
-            print(f"{'Level':<8} {'WAPE':<10} {'R²':<8} {'MAE':<10} {'RMSE':<10}")
+            print(f"{'Level':<8} {'WAPE':<10} {'WASE':<12} {'R²':<8} {'MAE':<10} {'RMSE':<10}")
             print("-" * 50)
             
             for rank in range(4):
                 wape = row.get(f'Rank_{rank}_WAPE', np.nan)
+                wase = row.get(f'Rank_{rank}_WASE', np.nan)
                 r2 = row.get(f'Rank_{rank}_R2', np.nan)
                 mae = row.get(f'Rank_{rank}_MAE', np.nan)
                 rmse = row.get(f'Rank_{rank}_RMSE', np.nan)
                 
                 if not np.isnan(wape):
-                    print(f"Rank {rank:<3} {wape*100:<10.2f}% {r2:<8.3f} {mae:<10.2f} {rmse:<10.2f}")
+                    print(f"Rank {rank:<3} {wape:<10.2f}% {wase:<12.4f} {r2:<8.3f} {mae:<10.2f} {rmse:<10.2f}")
                 else:
-                    print(f"Rank {rank:<3} {'N/A':<10} {'N/A':<8} {'N/A':<10} {'N/A':<10}")
+                    print(f"Rank {rank:<3} {'N/A':<10} {'N/A':<12} {'N/A':<8} {'N/A':<10} {'N/A':<10}")
     else:
         print("Hierarchical metrics not available (entities_test or hierarchy data missing)")
 

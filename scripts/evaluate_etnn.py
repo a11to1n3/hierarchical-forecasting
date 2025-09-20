@@ -28,14 +28,13 @@ from hierarchical_forecasting.models import (
 )
 from hierarchical_forecasting.data import DataPreprocessor, HierarchicalDataLoader
 from hierarchical_forecasting.baselines import ETNNBaseline, SimplifiedETNNBaseline
-from hierarchical_forecasting.baselines import TemporalTransformerBaseline, PretrainedTransformerBaseline
+from hierarchical_forecasting.baselines import PatchTSTBaseline, TimesNetBaseline
+from hierarchical_forecasting.utils import (
+    weighted_absolute_percentage_error,
+    weighted_absolute_squared_error,
+)
 from hierarchical_forecasting.visualization import TrainingVisualizer
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-
-
-def weighted_absolute_percentage_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Calculate Weighted Absolute Percentage Error (WAPE)."""
-    return np.sum(np.abs(y_true - y_pred)) / np.sum(np.abs(y_true)) * 100
 
 
 def evaluate_hierarchical_metrics(y_true: np.ndarray, y_pred: np.ndarray, 
@@ -55,6 +54,7 @@ def evaluate_hierarchical_metrics(y_true: np.ndarray, y_pred: np.ndarray,
     
     # Overall metrics
     metrics['Overall_WAPE'] = weighted_absolute_percentage_error(y_true, y_pred)
+    metrics['Overall_WASE'] = weighted_absolute_squared_error(y_true, y_pred)
     metrics['Overall_MAE'] = mean_absolute_error(y_true, y_pred)
     metrics['Overall_RMSE'] = np.sqrt(mean_squared_error(y_true, y_pred))
     metrics['Overall_R2'] = r2_score(y_true, y_pred)
@@ -69,6 +69,7 @@ def evaluate_hierarchical_metrics(y_true: np.ndarray, y_pred: np.ndarray,
                 y_pred_level = y_pred[:, level_mask]
                 
                 metrics[f'Level_{level}_WAPE'] = weighted_absolute_percentage_error(y_true_level, y_pred_level)
+                metrics[f'Level_{level}_WASE'] = weighted_absolute_squared_error(y_true_level, y_pred_level)
                 metrics[f'Level_{level}_MAE'] = mean_absolute_error(y_true_level, y_pred_level)
                 metrics[f'Level_{level}_RMSE'] = np.sqrt(mean_squared_error(y_true_level, y_pred_level))
                 metrics[f'Level_{level}_R2'] = r2_score(y_true_level, y_pred_level)
@@ -76,7 +77,9 @@ def evaluate_hierarchical_metrics(y_true: np.ndarray, y_pred: np.ndarray,
     return metrics
 
 
-def create_etnn_models() -> Dict[str, Any]:
+def create_etnn_models(
+    patchtst_checkpoint: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Create ETNN-based models for evaluation.
     
@@ -98,21 +101,6 @@ def create_etnn_models() -> Dict[str, Any]:
             use_geometric_features=True,
             epochs=75
         ),
-        'Temporal_Transformer': TemporalTransformerBaseline(
-            sequence_length=6,
-            d_model=128,
-            nhead=4,
-            num_layers=3,
-            epochs=40
-        ),
-        'Foundation_Transformer': PretrainedTransformerBaseline(
-            sequence_length=6,
-            d_model=256,
-            nhead=8,
-            num_layers=4,
-            epochs=20,
-            freeze_encoder=True
-        ),
         'Simplified_ETNN': SimplifiedETNNBaseline(
             hidden_dim=32,
             num_layers=3,
@@ -124,11 +112,22 @@ def create_etnn_models() -> Dict[str, Any]:
             epochs=75
         )
     }
-    
+
+    if patchtst_checkpoint:
+        models['PatchTST'] = PatchTSTBaseline(checkpoint_path=patchtst_checkpoint)
+    else:
+        print("Skipping PatchTST evaluation baseline (no checkpoint provided).")
+
+    models['TimesNet'] = TimesNetBaseline()
+
     return models
 
 
-def run_etnn_evaluation(data_path: str, output_dir: str = "outputs/etnn_evaluation") -> pd.DataFrame:
+def run_etnn_evaluation(
+    data_path: str,
+    output_dir: str = "outputs/etnn_evaluation",
+    patchtst_checkpoint: Optional[str] = None,
+) -> pd.DataFrame:
     """
     Run comprehensive ETNN model evaluation.
     
@@ -215,7 +214,9 @@ def run_etnn_evaluation(data_path: str, output_dir: str = "outputs/etnn_evaluati
     }
     
     # Create ETNN models
-    etnn_models = create_etnn_models()
+    etnn_models = create_etnn_models(
+        patchtst_checkpoint=patchtst_checkpoint,
+    )
     
     # Evaluation results
     results = []
@@ -255,6 +256,7 @@ def run_etnn_evaluation(data_path: str, output_dir: str = "outputs/etnn_evaluati
             print(f"✅ {model_name} completed:")
             print(f"   - Training time: {training_time:.2f}s")
             print(f"   - Overall WAPE: {metrics['Overall_WAPE']:.4f}%")
+            print(f"   - Overall WASE: {metrics['Overall_WASE']:.6f}")
             print(f"   - Overall RMSE: {metrics['Overall_RMSE']:.4f}")
             print(f"   - Overall R²: {metrics['Overall_R2']:.4f}")
             
@@ -265,6 +267,7 @@ def run_etnn_evaluation(data_path: str, output_dir: str = "outputs/etnn_evaluati
                 'Model': model_name,
                 'Training_Time': 0,
                 'Overall_WAPE': float('inf'),
+                'Overall_WASE': float('inf'),
                 'Overall_MAE': float('inf'),
                 'Overall_RMSE': float('inf'),
                 'Overall_R2': -float('inf'),
@@ -287,7 +290,7 @@ def run_etnn_evaluation(data_path: str, output_dir: str = "outputs/etnn_evaluati
     
     if len(results_df) > 0:
         # Sort by overall WAPE (lower is better)
-        summary_df = results_df[['Model', 'Overall_WAPE', 'Overall_RMSE', 'Overall_R2', 'Training_Time']].copy()
+        summary_df = results_df[['Model', 'Overall_WAPE', 'Overall_WASE', 'Overall_RMSE', 'Overall_R2', 'Training_Time']].copy()
         summary_df = summary_df.sort_values('Overall_WAPE')
         
         print(summary_df.to_string(index=False, float_format='%.4f'))
@@ -295,8 +298,10 @@ def run_etnn_evaluation(data_path: str, output_dir: str = "outputs/etnn_evaluati
         # Best model
         best_model = summary_df.iloc[0]['Model']
         best_wape = summary_df.iloc[0]['Overall_WAPE']
+        best_wase = summary_df.iloc[0]['Overall_WASE']
         print(f"\n🏆 Best ETNN Model: {best_model}")
         print(f"   Best WAPE: {best_wape:.4f}%")
+        print(f"   Best WASE: {best_wase:.6f}")
     
     return results_df
 
@@ -429,6 +434,7 @@ def run_hybrid_etnn_ccmpn_evaluation(data_path: str, output_dir: str = "outputs/
     
     print(f"✅ Hybrid ETNN-CCMPN Results:")
     print(f"   - Overall WAPE: {metrics['Overall_WAPE']:.4f}%")
+    print(f"   - Overall WASE: {metrics['Overall_WASE']:.6f}")
     print(f"   - Overall RMSE: {metrics['Overall_RMSE']:.4f}")
     print(f"   - Overall R²: {metrics['Overall_R2']:.4f}")
     
@@ -448,6 +454,8 @@ def main():
                        help='Output directory for results')
     parser.add_argument('--eval_hybrid', action='store_true',
                        help='Also evaluate hybrid ETNN-CCMPN model')
+    parser.add_argument('--patchtst_checkpoint', type=str, default=None,
+                        help='Path to a TorchScript or module checkpoint for PatchTST')
     
     args = parser.parse_args()
     
@@ -456,7 +464,11 @@ def main():
     
     try:
         # Run ETNN baseline evaluation
-        results_df = run_etnn_evaluation(args.data_path, args.output_dir)
+        results_df = run_etnn_evaluation(
+            args.data_path,
+            args.output_dir,
+            patchtst_checkpoint=args.patchtst_checkpoint,
+        )
         
         # Run hybrid model evaluation if requested
         if args.eval_hybrid:

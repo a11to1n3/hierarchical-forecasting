@@ -20,6 +20,10 @@ sys.path.append(str(Path(__file__).parent.parent))
 from hierarchical_forecasting.models import CombinatorialComplex, EnhancedHierarchicalModel
 from hierarchical_forecasting.data import DataPreprocessor, HierarchicalDataLoader
 from hierarchical_forecasting.visualization import TrainingVisualizer
+from hierarchical_forecasting.utils import (
+    weighted_absolute_percentage_error,
+    weighted_absolute_squared_error,
+)
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 import warnings
 
@@ -122,27 +126,28 @@ def evaluate_model_detailed(model, test_data, cc, preprocessor, device):
         }
         
         # Calculate comprehensive metrics
-        mask = level_actuals > 0  # Avoid division by zero
+        wape = weighted_absolute_percentage_error(level_actuals, level_preds)
+        wase = weighted_absolute_squared_error(level_actuals, level_preds)
+
+        mask = np.abs(level_actuals) > 0  # Avoid division by zero for other metrics
         if mask.sum() > 0:
             filtered_actuals = level_actuals[mask]
             filtered_preds = level_preds[mask]
-            
-            wape = np.sum(np.abs(filtered_actuals - filtered_preds)) / np.sum(np.abs(filtered_actuals))
+
             r2 = r2_score(filtered_actuals, filtered_preds)
             mae = mean_absolute_error(filtered_actuals, filtered_preds)
             rmse = np.sqrt(mean_squared_error(filtered_actuals, filtered_preds))
             mape = np.mean(np.abs((filtered_actuals - filtered_preds) / filtered_actuals)) * 100
-            
-            # Additional metrics
+
             bias = np.mean(filtered_preds - filtered_actuals)
             std_residuals = np.std(filtered_preds - filtered_actuals)
-            
         else:
-            wape = mae = rmse = mape = bias = std_residuals = r2 = np.nan
+            r2 = mae = rmse = mape = bias = std_residuals = np.nan
         
         results.append({
             'Level': level_name,
-            'WAPE': f'{wape:.2%}' if not np.isnan(wape) else 'N/A',
+            'WAPE': f'{wape:.2f}%' if not np.isnan(wape) else 'N/A',
+            'WASE': f'{wase:.2f}' if not np.isnan(wase) else 'N/A',
             'R²': f'{r2:.3f}' if not np.isnan(r2) else 'N/A',
             'MAE': f'{mae:.2f}' if not np.isnan(mae) else 'N/A',
             'RMSE': f'{rmse:.2f}' if not np.isnan(rmse) else 'N/A',

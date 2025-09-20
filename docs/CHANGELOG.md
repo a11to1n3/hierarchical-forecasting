@@ -2,5 +2,6 @@
 
 ## Added
 
-- Introduced transformer-based baselines (`TemporalTransformerBaseline`, `PretrainedTransformerBaseline`) alongside the existing ETNN options to provide SOTA transformer and foundation-model style comparisons.
+- Added PatchTST wrapper (requires supplying an official checkpoint) and a self-contained PyTorch implementation of TimesNet to serve as high-capacity transformer baselines. Legacy transformer placeholders have been removed.
+- Added shared metric helpers (`weighted_absolute_percentage_error`, `weighted_absolute_squared_error`) and surfaced WAPE/WASE throughout comparison and evaluation pipelines.
 - Wired new baselines into `scripts/compare_baselines.py` and `scripts/evaluate_etnn.py` for immediate benchmarking.
