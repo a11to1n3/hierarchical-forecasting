@@ -28,7 +28,7 @@ from hierarchical_forecasting.baselines import (
     RandomForestBaseline, HierarchicalRandomForest,
     LSTMBaseline, MultiEntityLSTM,
     BottomUpBaseline, TopDownBaseline, MiddleOutBaseline,
-    MinTBaseline, OLSBaseline
+    MinTBaseline, OLSBaseline, ETNNBaseline, SimplifiedETNNBaseline
 )
 
 try:
@@ -61,6 +61,10 @@ def create_baseline_models() -> Dict:
         # Neural network baselines
         'LSTM': LSTMBaseline(input_size=10, hidden_size=32, epochs=20),  # Will be updated with actual input size
         'Multi_Entity_LSTM': MultiEntityLSTM(input_size=10, hidden_size=32, epochs=20),
+        
+        # ETNN-based baselines (Topological Deep Learning)
+        'ETNN': ETNNBaseline(hidden_dim=32, num_layers=2, epochs=30),
+        'Simplified_ETNN': SimplifiedETNNBaseline(hidden_dim=32, num_layers=2, epochs=30),
         
         # Hierarchical reconciliation methods
         'Bottom_Up_Linear': BottomUpBaseline(base_model='linear'),
@@ -348,13 +352,24 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
     """
     print("Loading and preprocessing data...")
     
-    # Load data
-    data = pd.read_csv(data_path)
+    # Load data with proper date parsing (like the training script)
+    try:
+        data = pd.read_csv(data_path, parse_dates=['date'], index_col='date')
+        print(f"✅ Successfully loaded data from {data_path}")
+        print(f"Data shape: {data.shape}")
+        print(f"Date range: {data.index.min()} to {data.index.max()}")
+    except Exception as e:
+        print(f"❌ Error loading data: {e}")
+        # Fallback: load without date parsing and convert manually
+        data = pd.read_csv(data_path)
+        if 'date' in data.columns:
+            data['date'] = pd.to_datetime(data['date'])
+            data = data.set_index('date').sort_index()
+    
     preprocessor = DataPreprocessor()
     
-    # Create hierarchy and features
+    # Create hierarchy
     hierarchy = preprocessor.create_hierarchy(data)
-    features_df = preprocessor.create_features(data)
     
     # Split data
     train_data, val_data, test_data = preprocessor.split_data(data, test_period=30, val_period=30)
@@ -380,11 +395,13 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
             else:
                 entity_levels[i] = 3  # Total level
         
-        # Remove entity_id column for model input
-        feature_columns = [col for col in features.columns if col != 'entity_id']
+        # Remove entity_id and non-feature columns for model input
+        # Use the feature columns identified by the preprocessor
+        feature_columns = [col for col in preprocessor.feature_columns if col in features.columns]
         X = features[feature_columns].values
         y = targets['target'].values
         
+        print(f"Selected feature columns: {feature_columns}")
         return X, y, entity_levels, features['entity_id'].values
     
     X_train, y_train, levels_train, entities_train = prepare_split_data(train_data)
@@ -679,25 +696,7 @@ def main():
                     print(f"Rank {rank:<3} {'N/A':<10} {'N/A':<8} {'N/A':<10} {'N/A':<10}")
     else:
         print("Hierarchical metrics not available (entities_test or hierarchy data missing)")
-    
-    # Add CCMPN comparison reference
-    print(f"\n" + "="*80)
-    print("CCMPN MODEL REFERENCE (Your Results)")
-    print("="*80)
-    print(f"{'Level':<8} {'WAPE':<10} {'R²':<8} {'MAE':<10} {'RMSE':<10}")
-    print("-" * 50)
-    ccmpn_results = [
-        (0, 12.82, 0.970, 16.14, 27.95),
-        (1, 8.52, 0.975, 31.92, 44.91),
-        (2, 5.48, 0.910, 605.47, 830.73),
-        (3, 5.48, 0.910, 605.47, 830.73)
-    ]
-    for rank, wape, r2, mae, rmse in ccmpn_results:
-        print(f"Rank {rank:<3} {wape:<10.2f}% {r2:<8.3f} {mae:<10.2f} {rmse:<10.2f}")
-    
-    print("\nYour CCMPN model shows excellent performance across all hierarchy levels!")
-    print("Compare these results with the baseline models above.")
-    
+
     if args.visualize:
         print("\nCreating visualizations...")
         visualize_results(results_df, args.output_dir)

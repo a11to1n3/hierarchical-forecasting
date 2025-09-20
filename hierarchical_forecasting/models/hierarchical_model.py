@@ -166,12 +166,25 @@ class HierarchicalLoss(nn.Module):
 
 
 class ModelConfig:
-    """Configuration class for the hierarchical model."""
+    """Configuration class for the hierarchical model with ETNN support."""
     
     def __init__(self):
+        # Basic model parameters
+        self.input_dim = 10
         self.hidden_dim = 32
+        self.output_dim = 5
         self.n_layers = 2
+        self.num_layers = 2  # Alias for consistency
         self.dropout = 0.1
+        
+        # ETNN-specific parameters
+        self.spatial_dim = 2
+        self.max_entities = 100
+        self.max_hierarchy_depth = 3
+        self.use_geometric_invariants = True
+        self.consistency_weight = 0.1
+        
+        # Training parameters
         self.learning_rate = 0.005
         self.weight_decay = 1e-5
         self.batch_size = 32
