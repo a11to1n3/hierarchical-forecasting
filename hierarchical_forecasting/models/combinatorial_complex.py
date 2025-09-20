@@ -1,13 +1,19 @@
-"""
-Combinatorial Complex implementation for hierarchical sales data.
+"""Combinatorial Complex utilities.
 
-This module implements the mathematical structure representing the sales hierarchy
-as a combinatorial complex with covering relations and neighborhood matrices.
+This module provides a lightweight combinatorial complex representation that can
+operate either on raw hierarchy tables (company/store/SKU identifiers) or on
+pre-assembled hierarchy dictionaries. The resulting complex exposes adjacency
+matrices for multiple neighborhood types so that downstream ETNN components can
+perform message passing in an equivariant way.
 """
+
+from __future__ import annotations
 
 import torch
 from collections import defaultdict
-from typing import Dict, List, Tuple, Any
+from functools import lru_cache
+from typing import Any, Dict, Iterable, List, Tuple, Union
+
 
 
 class CombinatorialComplex:
@@ -38,6 +44,10 @@ class CombinatorialComplex:
         # Build hierarchy: SKU (0) -> Store (1) -> Company (2) -> Total (3)
         self._build_hierarchy(df)
         self._create_cell_mappings()
+        self._build_parent_child_maps()
+        self._build_cell_to_node_map()
+        self.edge_index: Dict[str, torch.Tensor] = {}
+        self.node_degrees: Dict[str, torch.Tensor] = {}
         
         print(f"📊 Hierarchy built:")
         print(f"  - Rank 0 (SKUs): {len(self.cells[0])} cells")
@@ -67,6 +77,56 @@ class CombinatorialComplex:
         
         self.num_cells = len(self.cell_to_int)
 
+    def _build_parent_child_maps(self) -> None:
+        """Create lookup tables for parent/child relationships between cells."""
+        self.rank_lookup = {}
+        for rank, cells in self.cells.items():
+            for cell in cells:
+                self.rank_lookup[cell] = rank
+
+        self.parent_map: Dict[Tuple[Any, ...], Tuple[Any, ...]] = {}
+        self.children_map: Dict[Tuple[Any, ...], List[Tuple[Any, ...]]] = defaultdict(list)
+
+        # SKU -> Store relations
+        for sku_cell in self.cells[0]:
+            store_cell = (sku_cell[0], sku_cell[1]) if len(sku_cell) >= 2 else None
+            if store_cell and store_cell in self.cell_to_int:
+                self.parent_map[sku_cell] = store_cell
+                self.children_map[store_cell].append(sku_cell)
+
+        # Store -> Company relations
+        for store_cell in self.cells[1]:
+            company_cell = (store_cell[0],)
+            if company_cell in self.cell_to_int:
+                self.parent_map[store_cell] = company_cell
+                self.children_map[company_cell].append(store_cell)
+
+        # Company -> Total relations (single root)
+        if self.cells[3]:
+            root = self.cells[3][0]
+            for company_cell in self.cells[2]:
+                self.parent_map[company_cell] = root
+                self.children_map[root].append(company_cell)
+
+    def _build_cell_to_node_map(self) -> None:
+        """Map every cell to the list of bottom-level cell indices it contains."""
+
+        @lru_cache(maxsize=None)
+        def collect_bottom(cell: Tuple[Any, ...]) -> List[int]:
+            rank = self.rank_lookup.get(cell, None)
+            if rank == 0:
+                return [self.cell_to_int[cell]]
+            children = self.children_map.get(cell, [])
+            collected: List[int] = []
+            for child in children:
+                collected.extend(collect_bottom(child))
+            return sorted(set(collected))
+
+        self.cell_to_nodes: List[List[int]] = []
+        for idx in range(self.num_cells):
+            cell = self.int_to_cell[idx]
+            self.cell_to_nodes.append(collect_bottom(cell))
+
     def create_neighborhood_matrices(self) -> Dict[str, torch.sparse.FloatTensor]:
         """
         Creates sparse matrices for different neighborhood relationships.
@@ -82,58 +142,56 @@ class CombinatorialComplex:
         # 2. Downward Adjacency (Peer-to-Peer for SKUs in the same store)
         self._create_adjacency_relations(edges)
 
+        # Additional aliases expected by ETNN layers
+        if edges.get('incidence_up'):
+            edges['up'] = list(edges['incidence_up'])
+            edges['down'] = [[dst, src] for src, dst in edges['incidence_up']]
+        else:
+            edges.setdefault('up', [])
+            edges.setdefault('down', [])
+
+        if edges.get('adj_down'):
+            edges['boundary'] = list(edges['adj_down'])
+        else:
+            edges.setdefault('boundary', [])
+
         # Convert edge lists to sparse tensors
         matrices = {}
         for name, edge_list in edges.items():
             if not edge_list:
                 continue
-            edge_tensor = torch.tensor(edge_list, dtype=torch.long).t()
-            matrices[name] = torch.sparse_coo_tensor(
+            # Remove duplicate edges to keep matrices well-conditioned.
+            unique_edges = sorted({(src, dst) for src, dst in edge_list})
+            if not unique_edges:
+                continue
+            edge_tensor = torch.tensor(unique_edges, dtype=torch.long).t()
+            matrix = torch.sparse_coo_tensor(
                 edge_tensor, 
-                torch.ones(len(edge_list)), 
+                torch.ones(len(unique_edges)), 
                 (self.num_cells, self.num_cells)
-            )
+            ).coalesce()
+            matrices[name] = matrix
+            self.edge_index[name] = matrix.indices()
+            self.node_degrees[name] = torch.bincount(self.edge_index[name][1], minlength=self.num_cells)
             print(f"  - {name}: {len(edge_list)} edges")
             
         return matrices
     
     def _create_incidence_relations(self, edges):
         """Create incidence (covering) relations between hierarchy levels."""
-        # SKU -> Store
-        for sku_cell in self.cells[0]:
-            store_cell = (sku_cell[0], sku_cell[1])  # (companyID, storeID)
-            edges['incidence_up'].append([
-                self.cell_to_int[sku_cell], 
-                self.cell_to_int[store_cell]
-            ])
-        
-        # Store -> Company
-        for store_cell in self.cells[1]:
-            company_cell = (store_cell[0],)  # (companyID,)
-            edges['incidence_up'].append([
-                self.cell_to_int[store_cell], 
-                self.cell_to_int[company_cell]
-            ])
-        
-        # Company -> Total
-        for company_cell in self.cells[2]:
-            edges['incidence_up'].append([
-                self.cell_to_int[company_cell], 
-                self.cell_to_int[self.cells[3][0]]
-            ])
+        for child_cell, parent_cell in self.parent_map.items():
+            child_idx = self.cell_to_int[child_cell]
+            parent_idx = self.cell_to_int[parent_cell]
+            edges['incidence_up'].append([child_idx, parent_idx])
     
     def _create_adjacency_relations(self, edges):
         """Create adjacency relations between peers at the same level."""
-        # Peer-to-Peer for SKUs in the same store
-        for store_cell in self.cells[1]:
-            skus_in_store = [
-                c for c in self.cells[0] 
-                if c[0] == store_cell[0] and c[1] == store_cell[1]
-            ]
-            for i in range(len(skus_in_store)):
-                for j in range(i + 1, len(skus_in_store)):
-                    u = self.cell_to_int[skus_in_store[i]]
-                    v = self.cell_to_int[skus_in_store[j]]
+        for parent_cell, child_cells in self.children_map.items():
+            child_indices = [self.cell_to_int[ch] for ch in child_cells]
+            for i in range(len(child_indices)):
+                for j in range(i + 1, len(child_indices)):
+                    u = child_indices[i]
+                    v = child_indices[j]
                     edges['adj_down'].append([u, v])
                     edges['adj_down'].append([v, u])
     

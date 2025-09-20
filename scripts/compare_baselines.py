@@ -28,7 +28,8 @@ from hierarchical_forecasting.baselines import (
     RandomForestBaseline, HierarchicalRandomForest,
     LSTMBaseline, MultiEntityLSTM,
     BottomUpBaseline, TopDownBaseline, MiddleOutBaseline,
-    MinTBaseline, OLSBaseline, ETNNBaseline, SimplifiedETNNBaseline
+    MinTBaseline, OLSBaseline, ETNNBaseline, SimplifiedETNNBaseline,
+    TemporalTransformerBaseline, PretrainedTransformerBaseline
 )
 
 try:
@@ -42,10 +43,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-def create_baseline_models() -> Dict:
+def create_baseline_models(input_size: int) -> Dict:
     """
     Create all baseline models for comparison.
-    
+
+    Args:
+        input_size: Number of features provided to each model.
+
     Returns:
         Dictionary of baseline models
     """
@@ -57,15 +61,17 @@ def create_baseline_models() -> Dict:
         'Random_Forest': RandomForestBaseline(n_estimators=100),
         'Multi_Level_Linear': MultiLevelLinearRegression(),
         'Hierarchical_RF': HierarchicalRandomForest(n_estimators=50),
-        
+
         # Neural network baselines
-        'LSTM': LSTMBaseline(input_size=10, hidden_size=32, epochs=20),  # Will be updated with actual input size
-        'Multi_Entity_LSTM': MultiEntityLSTM(input_size=10, hidden_size=32, epochs=20),
+        'LSTM': LSTMBaseline(input_size=input_size, hidden_size=32, epochs=20),
+        'Multi_Entity_LSTM': MultiEntityLSTM(input_size=input_size, hidden_size=32, epochs=20),
         
         # ETNN-based baselines (Topological Deep Learning)
         'ETNN': ETNNBaseline(hidden_dim=32, num_layers=2, epochs=30),
         'Simplified_ETNN': SimplifiedETNNBaseline(hidden_dim=32, num_layers=2, epochs=30),
-        
+        'Temporal_Transformer': TemporalTransformerBaseline(sequence_length=6, d_model=128, nhead=4, num_layers=3, epochs=40),
+        'Foundation_Transformer': PretrainedTransformerBaseline(sequence_length=6, d_model=256, nhead=8, num_layers=4, epochs=20, freeze_encoder=True),
+
         # Hierarchical reconciliation methods
         'Bottom_Up_Linear': BottomUpBaseline(base_model='linear'),
         'Bottom_Up_RF': BottomUpBaseline(base_model='random_forest', n_estimators=50),
@@ -384,16 +390,35 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
         targets = preprocessor.create_targets(split_data)
         
         # Create entity level indicators
-        entity_levels = np.zeros(len(features))
+        entity_levels = np.zeros(len(features), dtype=int)
         for i, entity_id in enumerate(features['entity_id']):
-            if any(entity_id in hierarchy[level] for level in ['sku'] if level in hierarchy):
-                entity_levels[i] = 0  # SKU level
-            elif any(entity_id in hierarchy[level] for level in ['store'] if level in hierarchy):
-                entity_levels[i] = 1  # Store level
-            elif any(entity_id in hierarchy[level] for level in ['company'] if level in hierarchy):
-                entity_levels[i] = 2  # Company level
+            # Normalise entity identifiers to tuples for comparison
+            if isinstance(entity_id, (list, tuple)):
+                entity_tuple = tuple(entity_id)
             else:
-                entity_levels[i] = 3  # Total level
+                entity_tuple = (entity_id,)
+
+            company_id = store_id = sku_id = None
+            if len(entity_tuple) >= 3:
+                company_id, store_id, sku_id = entity_tuple[:3]
+            elif len(entity_tuple) == 2:
+                company_id, store_id = entity_tuple
+            elif len(entity_tuple) == 1:
+                company_id = entity_tuple[0]
+
+            try:
+                if 3 in hierarchy and entity_tuple in hierarchy[3]:
+                    entity_levels[i] = 3
+                elif 0 in hierarchy and (company_id, store_id, sku_id) in hierarchy[0]:
+                    entity_levels[i] = 0
+                elif 1 in hierarchy and (company_id, store_id) in hierarchy[1]:
+                    entity_levels[i] = 1
+                elif 2 in hierarchy and (company_id,) in hierarchy[2]:
+                    entity_levels[i] = 2
+                else:
+                    entity_levels[i] = 0
+            except Exception:
+                entity_levels[i] = 0
         
         # Remove entity_id and non-feature columns for model input
         # Use the feature columns identified by the preprocessor
@@ -410,14 +435,9 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
     
     print(f"Feature dimensions: {X_train.shape}")
     
-    # Create baseline models
-    baselines = create_baseline_models()
-    
-    # Update LSTM input sizes
+    # Create baseline models with the correct input dimensionality
     input_size = X_train.shape[1]
-    for name in ['LSTM', 'Multi_Entity_LSTM']:
-        if name in baselines:
-            baselines[name].input_size = input_size
+    baselines = create_baseline_models(input_size)
     
     results = []
     
@@ -432,7 +452,8 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
             # Prepare training arguments
             train_kwargs = {
                 'hierarchy': hierarchy,
-                'entity_levels': levels_train
+                'entity_levels': levels_train,
+                'entity_ids': entities_train
             }
             
             # Special handling for Prophet models
@@ -450,6 +471,7 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
             
             # Evaluate on validation set
             eval_kwargs = {'entity_levels': levels_val}
+            eval_kwargs['entity_ids'] = entities_val
             if 'Prophet' in name:
                 val_dates = pd.date_range('2023-01-01', periods=len(X_val), freq='D')
                 eval_kwargs['dates'] = val_dates
@@ -464,6 +486,7 @@ def run_baseline_comparison(data_path: str, output_dir: str = "outputs") -> pd.D
             
             # Evaluate on test set
             eval_kwargs['entity_levels'] = levels_test
+            eval_kwargs['entity_ids'] = entities_test
             if 'Prophet' in name:
                 test_dates = pd.date_range('2023-01-01', periods=len(X_test), freq='D')
                 eval_kwargs['dates'] = test_dates

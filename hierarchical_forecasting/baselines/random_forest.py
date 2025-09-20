@@ -57,13 +57,21 @@ class RandomForestBaseline(BaselineModel):
         
         Args:
             X: Input features [n_samples, n_features]
-            y: Target values [n_samples]
+            y: Target values [n_samples] or [n_samples, 1]
             hierarchy: Ignored for this baseline
             **kwargs: Additional arguments
             
         Returns:
             Self for method chaining
         """
+        # Handle both 1D and 2D target arrays
+        self._target_was_2d = False
+        if y.ndim == 2 and y.shape[1] == 1:
+            self._target_was_2d = True
+            y = y.ravel()  # Convert 2D single column to 1D
+        elif y.ndim == 2 and y.shape[1] > 1:
+            raise ValueError("Random Forest baseline only supports single target. Use HierarchicalRandomForest for multiple targets.")
+        
         # Normalize features if requested
         if self.scaler is not None:
             X_scaled = self.scaler.fit_transform(X)
@@ -85,7 +93,7 @@ class RandomForestBaseline(BaselineModel):
             **kwargs: Additional arguments
             
         Returns:
-            Predictions [n_samples]
+            Predictions [n_samples] or [n_samples, 1] to match input format
         """
         if not self.is_fitted:
             raise ValueError("Model must be fitted before making predictions")
@@ -96,7 +104,14 @@ class RandomForestBaseline(BaselineModel):
         else:
             X_scaled = X
         
-        return self.model.predict(X_scaled)
+        predictions = self.model.predict(X_scaled)
+        
+        # If we expect 2D output (single column), reshape accordingly
+        # This maintains consistency with hierarchical forecasting expectations
+        if hasattr(self, '_target_was_2d') and self._target_was_2d:
+            predictions = predictions.reshape(-1, 1)
+        
+        return predictions
     
     def predict_with_uncertainty(self, X: np.ndarray, **kwargs) -> tuple:
         """

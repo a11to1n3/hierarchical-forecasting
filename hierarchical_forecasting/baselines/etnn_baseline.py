@@ -5,17 +5,19 @@ This module implements E(n) Equivariant Topological Neural Networks
 as baseline models following the ICLR 2025 paper concepts.
 """
 
+import math
 import torch
 import torch.nn as nn
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, Optional, Tuple
-from .base_baseline import BaseBaseline
+from torch.utils.data import DataLoader, TensorDataset
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+from .base import BaselineModel
 from ..models.etnn_layers import ETNNLayer, GeometricInvariants
 from ..models.combinatorial_complex import CombinatorialComplex
 
 
-class ETNNBaseline(BaseBaseline):
+class ETNNBaseline(BaselineModel):
     """
     E(n) Equivariant Topological Neural Network baseline for hierarchical forecasting.
     
@@ -30,6 +32,7 @@ class ETNNBaseline(BaseBaseline):
                  use_geometric_features: bool = True,
                  learning_rate: float = 0.001,
                  epochs: int = 100,
+                 batch_size: int = 128,
                  device: Optional[str] = None):
         """
         Initialize ETNN baseline.
@@ -43,47 +46,140 @@ class ETNNBaseline(BaseBaseline):
             epochs: Number of training epochs
             device: Device to use ('cpu', 'cuda', 'mps')
         """
-        super().__init__()
+        super().__init__(name="ETNN")
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.spatial_dim = spatial_dim
         self.use_geometric_features = use_geometric_features
         self.learning_rate = learning_rate
         self.epochs = epochs
+        self.batch_size = batch_size
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         
         self.model = None
         self.feature_dim = None
+        self.output_dim = None
         self.scaler_features = None
         self.scaler_targets = None
+        self._target_is_vector = False
+        self._entity_index: Dict[Tuple[Any, ...], int] = {}
+        self._complex: Optional[CombinatorialComplex] = None
         
+    def _resolve_sku_entities(self, hierarchy_info: Dict[str, Any]) -> List[Tuple[Any, ...]]:
+        candidates = [
+            hierarchy_info.get(0),
+            hierarchy_info.get('sku'),
+            hierarchy_info.get('skus'),
+            hierarchy_info.get('entities')
+        ]
+        for candidate in candidates:
+            if candidate:
+                raw_entities = list(candidate)
+                break
+        else:
+            raw_entities = []
+
+        processed_entities: List[Tuple[Any, ...]] = []
+        for entity in raw_entities:
+            processed_entities.append(self._canonical_entity(entity))
+
+        return processed_entities
+
     def _create_geometric_embedding(self, hierarchy_info: Dict[str, Any]) -> torch.Tensor:
         """
-        Create geometric embedding for entities based on hierarchy.
-        
+        Create deterministic geometric embeddings that reflect the hierarchy.
+
+        We map companies, stores, and SKUs to a 3-D coordinate system where each
+        dimension corresponds to the position of the entity within its level. The
+        mapping is stable across runs and does not rely on random sampling.
+
         Args:
-            hierarchy_info: Dictionary containing hierarchy structure
-            
+            hierarchy_info: Dictionary describing hierarchy levels. Expected keys
+                are either integer ranks (0 for SKU level) or descriptive strings
+                (e.g., "sku").
+
         Returns:
-            Geometric positions for each entity [num_entities, spatial_dim]
+            Tensor of shape [num_entities, spatial_dim] with coordinates in [0, 1].
         """
-        # Create simple geometric embedding based on hierarchy levels
-        # In practice, this could be learned or based on actual spatial relationships
-        
-        num_entities = len(hierarchy_info.get('entities', []))
-        if num_entities == 0:
+
+        def _normalise(index: int, count: int) -> float:
+            if count <= 1:
+                return 0.5
+            return index / float(count - 1)
+
+        sku_entities = self._resolve_sku_entities(hierarchy_info)
+
+        if not sku_entities:
+            # Fall back to a simple linear embedding if hierarchy is missing.
+            return torch.linspace(0.0, 1.0, steps=max(1, len(hierarchy_info.get('entities', []))),
+                                  device=self.device).unsqueeze(-1).repeat(1, self.spatial_dim)
+        processed_entities = sku_entities
+
+        if not processed_entities:
             return torch.zeros(1, self.spatial_dim, device=self.device)
-        
-        # Create random but consistent positions based on entity IDs
-        positions = []
-        for i, entity in enumerate(hierarchy_info.get('entities', [])):
-            # Use entity hash for consistent positioning
-            seed = hash(str(entity)) % 10000
-            torch.manual_seed(seed)
-            pos = torch.randn(self.spatial_dim) * 0.1
-            positions.append(pos)
-        
-        return torch.stack(positions).to(self.device)
+
+        # Build ordered mappings for companies, stores, and SKUs.
+        from collections import defaultdict
+
+        companies: List[Any] = sorted({ent[0] for ent in processed_entities if len(ent) >= 1})
+        company_to_idx = {company: idx for idx, company in enumerate(companies)}
+
+        stores_by_company: Dict[Any, List[Any]] = defaultdict(list)
+        skus_by_store: Dict[Tuple[Any, Any], List[Any]] = defaultdict(list)
+
+        for ent in processed_entities:
+            if len(ent) >= 2:
+                comp, store = ent[0], ent[1]
+                if store not in stores_by_company[comp]:
+                    stores_by_company[comp].append(store)
+            if len(ent) >= 3:
+                comp, store, sku = ent[0], ent[1], ent[2]
+                key = (comp, store)
+                if sku not in skus_by_store[key]:
+                    skus_by_store[key].append(sku)
+
+        for comp in stores_by_company:
+            stores_by_company[comp].sort()
+        for key in skus_by_store:
+            skus_by_store[key].sort()
+
+        coordinates: List[torch.Tensor] = []
+        for ent in processed_entities:
+            comp = ent[0]
+            comp_count = len(companies)
+            comp_coord = _normalise(company_to_idx.get(comp, 0), comp_count)
+
+            if len(ent) >= 2:
+                store_key = ent[1]
+                store_list = stores_by_company.get(comp, [store_key])
+                if store_key not in store_list:
+                    store_list.append(store_key)
+                    store_list.sort()
+                    stores_by_company[comp] = store_list
+                store_coord = _normalise(store_list.index(store_key), len(store_list))
+            else:
+                store_coord = 0.5
+
+            if len(ent) >= 3:
+                sku_key = ent[2]
+                sku_list = skus_by_store.get((comp, ent[1]), [sku_key])
+                if sku_key not in sku_list:
+                    sku_list.append(sku_key)
+                    sku_list.sort()
+                    skus_by_store[(comp, ent[1])] = sku_list
+                sku_coord = _normalise(sku_list.index(sku_key), len(sku_list))
+            else:
+                sku_coord = 0.5
+
+            coord_vec = torch.tensor([comp_coord, store_coord, sku_coord], device=self.device)
+            if self.spatial_dim < 3:
+                coord_vec = coord_vec[:self.spatial_dim]
+            elif self.spatial_dim > 3:
+                pad = torch.zeros(self.spatial_dim - 3, device=self.device)
+                coord_vec = torch.cat([coord_vec, pad], dim=0)
+            coordinates.append(coord_vec)
+
+        return torch.stack(coordinates, dim=0)
     
     def _create_combinatorial_complex(self, hierarchy_info: Dict[str, Any]) -> CombinatorialComplex:
         """
@@ -95,125 +191,234 @@ class ETNNBaseline(BaseBaseline):
         Returns:
             CombinatorialComplex representing the hierarchical structure
         """
-        entities = hierarchy_info.get('entities', [])
-        
-        # Create simple combinatorial complex
-        # 0-cells: individual entities
-        # 1-cells: pairs of related entities
-        # 2-cells: groups of entities at same level
-        
-        cells = {
-            0: list(range(len(entities))),  # Each entity is a 0-cell
-            1: [],  # Edges between related entities
-            2: []   # Higher-order relationships
+        sku_level = self._resolve_sku_entities(hierarchy_info)
+
+        if sku_level and all(len(ent) >= 3 for ent in sku_level):
+            rows = []
+            for ent in sku_level:
+                comp, store, sku = ent[0], ent[1], ent[2]
+                rows.append({'companyID': comp, 'storeID': store, 'skuID': sku})
+            hierarchy_source = pd.DataFrame(rows)
+        else:
+            # Fall back to previously used synthetic structure when hierarchy is not
+            # explicitly provided.
+            num_entities = len(sku_level) if sku_level else hierarchy_info.get('num_entities', 0)
+            if not num_entities:
+                num_entities = len(hierarchy_info.get('entities', []))
+            hierarchy_source = pd.DataFrame({
+                'companyID': np.arange(num_entities),
+                'storeID': np.zeros(num_entities),
+                'skuID': np.arange(num_entities)
+            })
+
+        return CombinatorialComplex(hierarchy_source)
+
+    @staticmethod
+    def _canonical_entity(entity: Any) -> Tuple[Any, ...]:
+        if isinstance(entity, tuple):
+            return entity
+        if isinstance(entity, list):
+            return tuple(entity)
+        if isinstance(entity, str):
+            delimiter = '|' if '|' in entity else '_'
+            parts = entity.split(delimiter)
+            return tuple(parts)
+        return (entity,)
+
+    def _build_cell_positions(
+        self,
+        cc: CombinatorialComplex,
+        bottom_positions: torch.Tensor,
+        sku_entities: List[Tuple[Any, ...]]
+    ) -> torch.Tensor:
+        positions = torch.zeros(cc.num_cells, bottom_positions.size(1), device=bottom_positions.device)
+
+        position_lookup = {
+            self._canonical_entity(entity)[:3]: coord
+            for entity, coord in zip(sku_entities, bottom_positions)
         }
-        
-        # Add edges for hierarchically related entities
-        for i in range(len(entities)):
-            for j in range(i + 1, len(entities)):
-                if i < len(entities) // 2 and j < len(entities) // 2:
-                    # Connect entities in same level
-                    cells[1].append([i, j])
-        
-        # Add 2-cells for groups
-        if len(entities) >= 3:
-            cells[2].append([0, 1, 2])  # First three entities form a 2-cell
-        
-        return CombinatorialComplex(cells)
+
+        for sku_cell in cc.cells[0]:
+            coord = position_lookup.get(self._canonical_entity(sku_cell)[:3])
+            if coord is None:
+                raise KeyError(f"Missing geometric embedding for entity {sku_cell}")
+            positions[cc.cell_to_int[sku_cell]] = coord
+
+        for rank in sorted(cc.cells.keys()):
+            if rank == 0:
+                continue
+            for cell in cc.cells[rank]:
+                idx = cc.cell_to_int[cell]
+                children = cc.children_map.get(cell, [])
+                if not children:
+                    continue
+                child_coords = torch.stack([positions[cc.cell_to_int[ch]] for ch in children], dim=0)
+                positions[idx] = child_coords.mean(dim=0)
+
+        return positions
+
+    def _build_base_features(self, cc: CombinatorialComplex, positions: torch.Tensor) -> torch.Tensor:
+        num_ranks = len(cc.cells)
+        base_features: List[torch.Tensor] = []
+
+        for idx in range(cc.num_cells):
+            cell = cc.int_to_cell[idx]
+            rank = cc.rank_lookup.get(cell, 0)
+            rank_one_hot = torch.zeros(num_ranks, device=positions.device)
+            rank_one_hot[rank] = 1.0
+            child_count = float(len(cc.children_map.get(cell, [])))
+            structural = torch.tensor([math.log1p(child_count)], device=positions.device)
+            base_features.append(torch.cat([rank_one_hot, structural, positions[idx]], dim=0))
+
+        return torch.stack(base_features, dim=0)
     
     def fit(self, 
             X_train: np.ndarray, 
             y_train: np.ndarray,
-            hierarchy_info: Optional[Dict[str, Any]] = None) -> None:
+            hierarchy: Optional[Dict] = None,
+            **kwargs) -> 'ETNNBaseline':
         """
         Train the ETNN baseline model.
         
         Args:
             X_train: Training features [num_samples, num_features]
             y_train: Training targets [num_samples, num_entities]
-            hierarchy_info: Optional hierarchy information
+            hierarchy: Optional hierarchy information
+            **kwargs: Additional arguments
+            
+        Returns:
+            Self for method chaining
         """
         from sklearn.preprocessing import StandardScaler
         
+        # Ensure inputs are two-dimensional for the scalers
+        X_train = np.asarray(X_train)
+        if X_train.ndim == 1:
+            X_train = X_train.reshape(-1, 1)
+
+        y_train = np.asarray(y_train)
+        if y_train.ndim == 1:
+            y_train = y_train.reshape(-1, 1)
+
+        self._target_is_vector = y_train.shape[1] == 1
+
         # Standardize features and targets
         self.scaler_features = StandardScaler()
         self.scaler_targets = StandardScaler()
-        
+
         X_scaled = self.scaler_features.fit_transform(X_train)
         y_scaled = self.scaler_targets.fit_transform(y_train)
-        
+
         self.feature_dim = X_train.shape[1]
-        num_entities = y_train.shape[1]
-        
-        # Create geometric embedding and combinatorial complex
-        if hierarchy_info is None:
-            hierarchy_info = {'entities': list(range(num_entities))}
-        
-        positions = self._create_geometric_embedding(hierarchy_info)
-        cc = self._create_combinatorial_complex(hierarchy_info)
-        
-        # Create ETNN model
+
+        entity_ids = kwargs.get('entity_ids')
+        if entity_ids is None:
+            raise ValueError("ETNNBaseline.fit requires 'entity_ids' in kwargs for alignment.")
+
+        sku_entities = self._resolve_sku_entities(hierarchy or {})
+        complex_structure = self._create_combinatorial_complex(hierarchy or {})
+        self._complex = complex_structure
+
+        bottom_positions = self._create_geometric_embedding(hierarchy or {})
+        cell_positions = self._build_cell_positions(complex_structure, bottom_positions, sku_entities)
+        base_features = self._build_base_features(complex_structure, cell_positions)
+
+        self._entity_index = {
+            self._canonical_entity(cell)[:3]: complex_structure.cell_to_int[cell]
+            for cell in complex_structure.cells[0]
+        }
+
+        def map_entities(raw_ids: Iterable[Any]) -> torch.Tensor:
+            indices = []
+            for raw in raw_ids:
+                canonical = self._canonical_entity(raw)[:3]
+                if canonical not in self._entity_index:
+                    raise KeyError(f"Unknown entity identifier {raw}")
+                indices.append(self._entity_index[canonical])
+            return torch.tensor(indices, dtype=torch.long)
+
+        entity_indices = map_entities(entity_ids)
+
         self.model = ETNNForecastingModel(
-            feature_dim=self.feature_dim,
+            input_dim=self.feature_dim,
+            base_features=base_features.to(self.device),
+            positions=cell_positions.to(self.device),
             hidden_dim=self.hidden_dim,
-            output_dim=num_entities,
             num_layers=self.num_layers,
-            spatial_dim=self.spatial_dim,
-            combinatorial_complex=cc,
-            positions=positions,
-            use_geometric_features=self.use_geometric_features
+            combinatorial_complex=complex_structure,
         ).to(self.device)
-        
-        # Training setup
+
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         criterion = nn.MSELoss()
-        
-        # Convert to tensors
-        X_tensor = torch.FloatTensor(X_scaled).to(self.device)
-        y_tensor = torch.FloatTensor(y_scaled).to(self.device)
-        
-        # Training loop
+
+        dataset = TensorDataset(
+            torch.FloatTensor(X_scaled),
+            torch.FloatTensor(y_scaled),
+            entity_indices
+        )
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
         self.model.train()
         for epoch in range(self.epochs):
-            optimizer.zero_grad()
-            
-            # Forward pass
-            predictions = self.model(X_tensor)
-            loss = criterion(predictions, y_tensor)
-            
-            # Backward pass
-            loss.backward()
-            optimizer.step()
-            
-            if (epoch + 1) % 20 == 0:
-                print(f"ETNN Epoch {epoch + 1}/{self.epochs}, Loss: {loss.item():.6f}")
+            epoch_loss = 0.0
+            total_samples = 0
+            for features_batch, targets_batch, entity_batch in dataloader:
+                features_batch = features_batch.to(self.device)
+                targets_batch = targets_batch.to(self.device)
+                entity_batch = entity_batch.to(self.device)
+
+                optimizer.zero_grad()
+                preds = self.model(features_batch, entity_batch)
+                loss = criterion(preds.squeeze(-1), targets_batch.squeeze(-1))
+                loss.backward()
+                optimizer.step()
+
+                batch_size = features_batch.size(0)
+                epoch_loss += loss.item() * batch_size
+                total_samples += batch_size
+
+            if (epoch + 1) % max(1, self.epochs // 5) == 0:
+                avg_loss = epoch_loss / max(1, total_samples)
+                print(f"ETNN Epoch {epoch + 1}/{self.epochs}, Loss: {avg_loss:.6f}")
+
+        self.is_fitted = True
+        return self
     
-    def predict(self, X_test: np.ndarray) -> np.ndarray:
-        """
-        Make predictions with the trained ETNN model.
-        
-        Args:
-            X_test: Test features [num_samples, num_features]
-            
-        Returns:
-            Predictions [num_samples, num_entities]
-        """
-        if self.model is None:
-            raise ValueError("Model not trained. Call fit() first.")
-        
-        # Standardize features
+    def predict(self, X_test: np.ndarray, **kwargs) -> np.ndarray:
+        """Run inference using the trained ETNN model."""
+        if self.model is None or self._complex is None:
+            raise ValueError("Model must be fitted before calling predict().")
+
+        entity_ids = kwargs.get('entity_ids')
+        if entity_ids is None:
+            raise ValueError("ETNNBaseline.predict requires 'entity_ids' in kwargs.")
+
+        X_test = np.asarray(X_test)
+        if X_test.ndim == 1:
+            X_test = X_test.reshape(-1, 1)
+
+        entity_indices = []
+        for raw in entity_ids:
+            canonical = self._canonical_entity(raw)[:3]
+            if canonical not in self._entity_index:
+                raise KeyError(f"Unknown entity identifier {raw}")
+            entity_indices.append(self._entity_index[canonical])
+
+        entity_tensor = torch.tensor(entity_indices, dtype=torch.long).to(self.device)
+
         X_scaled = self.scaler_features.transform(X_test)
         X_tensor = torch.FloatTensor(X_scaled).to(self.device)
-        
-        # Make predictions
+
         self.model.eval()
         with torch.no_grad():
-            predictions_scaled = self.model(X_tensor)
-            predictions = self.scaler_targets.inverse_transform(
-                predictions_scaled.cpu().numpy()
-            )
-        
-        return predictions
+            preds_scaled = self.model(X_tensor, entity_tensor)
+        preds = preds_scaled.cpu().numpy().reshape(-1, 1)
+        preds = self.scaler_targets.inverse_transform(preds)
+
+        if self._target_is_vector:
+            return preds.ravel()
+
+        return preds
     
     def get_name(self) -> str:
         """Get the name of this baseline method."""
@@ -221,156 +426,83 @@ class ETNNBaseline(BaseBaseline):
 
 
 class ETNNForecastingModel(nn.Module):
-    """
-    ETNN-based forecasting model that operates on combinatorial complexes.
-    """
-    
-    def __init__(self,
-                 feature_dim: int,
-                 hidden_dim: int,
-                 output_dim: int,
-                 num_layers: int,
-                 spatial_dim: int,
-                 combinatorial_complex: CombinatorialComplex,
-                 positions: torch.Tensor,
-                 use_geometric_features: bool = True):
-        """
-        Initialize ETNN forecasting model.
-        
-        Args:
-            feature_dim: Input feature dimension
-            hidden_dim: Hidden dimension for ETNN layers
-            output_dim: Output dimension (number of entities)
-            num_layers: Number of ETNN layers
-            spatial_dim: Spatial dimension for geometric features
-            combinatorial_complex: Combinatorial complex structure
-            positions: Initial positions for entities
-            use_geometric_features: Whether to use geometric invariants
-        """
+    """Lightweight ETNN forecaster operating on hierarchy complexes."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        base_features: torch.Tensor,
+        positions: torch.Tensor,
+        hidden_dim: int,
+        num_layers: int,
+        combinatorial_complex: CombinatorialComplex,
+        use_position_update: bool = True,
+    ) -> None:
         super().__init__()
-        
-        self.feature_dim = feature_dim
+
+        self.num_cells = base_features.size(0)
+        self.dynamic_dim = input_dim
+        self.base_dim = base_features.size(1)
         self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
-        self.num_layers = num_layers
-        self.spatial_dim = spatial_dim
-        self.use_geometric_features = use_geometric_features
-        
-        self.cc = combinatorial_complex
-        self.register_buffer('positions', positions)
-        
-        # Input projection
-        self.input_projection = nn.Linear(feature_dim, hidden_dim)
-        
-        # ETNN layers
-        self.etnn_layers = nn.ModuleList([
-            ETNNLayer(
-                hidden_dim=hidden_dim,
-                neighborhood_names=['up', 'down', 'boundary'],
-                use_position_update=True,
-                use_geometric_invariants=use_geometric_features
-            ) for _ in range(num_layers)
+
+        self.register_buffer('base_features', base_features)
+        self.register_buffer('base_positions', positions)
+
+        neighborhood_names = [name for name in ('up', 'down', 'boundary') if name in combinatorial_complex.neighborhoods]
+
+        self.input_projection = nn.Linear(self.base_dim + self.dynamic_dim, hidden_dim)
+        self.layers = nn.ModuleList([
+            ETNNLayer(hidden_dim, neighborhood_names, use_position_update=use_position_update)
+            for _ in range(num_layers)
         ])
-        
-        # Output projection
-        self.output_projection = nn.Linear(hidden_dim, 1)
-        
-        # Geometric feature extractor
-        if use_geometric_features:
-            self.geometric_mlp = nn.Sequential(
-                nn.Linear(3, hidden_dim // 2),  # 3 geometric invariants
-                nn.ReLU(),
-                nn.Linear(hidden_dim // 2, hidden_dim)
-            )
-    
-    def _extract_geometric_features(self, positions: torch.Tensor) -> torch.Tensor:
-        """
-        Extract geometric invariant features from positions.
-        
-        Args:
-            positions: Entity positions [num_entities, spatial_dim]
-            
-        Returns:
-            Geometric features [num_entities, hidden_dim]
-        """
-        num_entities = positions.size(0)
-        geometric_features = torch.zeros(num_entities, 3, device=positions.device)
-        
-        for i in range(num_entities):
-            for j in range(i + 1, num_entities):
-                pos_i = positions[i:i+1]  # [1, spatial_dim]
-                pos_j = positions[j:j+1]  # [1, spatial_dim]
-                
-                # Compute geometric invariants
-                pairwise_dist = GeometricInvariants.pairwise_distances(pos_i, pos_j)
-                centroid_dist = GeometricInvariants.centroid_distance(pos_i, pos_j)
-                hausdorff_dist = GeometricInvariants.hausdorff_distance(pos_i, pos_j)
-                
-                # Aggregate features (simple averaging)
-                geometric_features[i, 0] += pairwise_dist / (num_entities - 1)
-                geometric_features[i, 1] += centroid_dist / (num_entities - 1)
-                geometric_features[i, 2] += hausdorff_dist / (num_entities - 1)
-                
-                geometric_features[j, 0] += pairwise_dist / (num_entities - 1)
-                geometric_features[j, 1] += centroid_dist / (num_entities - 1)
-                geometric_features[j, 2] += hausdorff_dist / (num_entities - 1)
-        
-        return self.geometric_mlp(geometric_features)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass through ETNN model.
-        
-        Args:
-            x: Input features [batch_size, feature_dim]
-            
-        Returns:
-            Predictions [batch_size, output_dim]
-        """
+        self.output_projection = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+        # Store edge indices and node degrees as buffers so they reside on the
+        # correct device together with the model parameters.
+        self.edge_names: List[str] = []
+        self.node_degrees: Dict[str, torch.Tensor] = {}
+        for name in neighborhood_names:
+            matrix = combinatorial_complex.neighborhoods.get(name)
+            if matrix is None or matrix._nnz() == 0:
+                continue
+            indices = matrix.coalesce().indices()
+            degrees = torch.bincount(indices[1], minlength=self.num_cells)
+            self.edge_names.append(name)
+            self.register_buffer(f'{name}_edge_index', indices)
+            self.register_buffer(f'{name}_degree', degrees)
+
+    def _edge_tensors(self) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+        edge_indices: Dict[str, torch.Tensor] = {}
+        node_degrees: Dict[str, torch.Tensor] = {}
+        for name in self.edge_names:
+            edge_indices[name] = getattr(self, f'{name}_edge_index')
+            node_degrees[name] = getattr(self, f'{name}_degree')
+        return edge_indices, node_degrees
+
+    def forward(self, x: torch.Tensor, entity_indices: torch.Tensor) -> torch.Tensor:
         batch_size = x.size(0)
-        
-        # Project input to hidden dimension
-        h = self.input_projection(x)  # [batch_size, hidden_dim]
-        
-        # Expand to match number of entities
-        h = h.unsqueeze(1).expand(batch_size, self.output_dim, self.hidden_dim)
-        # [batch_size, output_dim, hidden_dim]
-        
-        # Create cell features dictionary for ETNN layers
-        cell_features = {
-            0: h.view(-1, self.hidden_dim)  # [batch_size * output_dim, hidden_dim]
-        }
-        
-        # Create positions for each batch item
-        positions = self.positions.unsqueeze(0).expand(batch_size, -1, -1)
-        # [batch_size, output_dim, spatial_dim]
-        
-        cell_positions = {
-            0: positions.view(-1, self.spatial_dim)  # [batch_size * output_dim, spatial_dim]
-        }
-        
-        # Add geometric features if enabled
-        if self.use_geometric_features:
-            geom_features = self._extract_geometric_features(self.positions)
-            geom_features = geom_features.unsqueeze(0).expand(batch_size, -1, -1)
-            geom_features = geom_features.view(-1, self.hidden_dim)
-            cell_features[0] = cell_features[0] + geom_features
-        
-        # Apply ETNN layers
-        for layer in self.etnn_layers:
-            cell_features, cell_positions = layer(cell_features, cell_positions, self.cc)
-        
-        # Extract 0-cell features and reshape
-        output_features = cell_features[0].view(batch_size, self.output_dim, self.hidden_dim)
-        
-        # Project to output
-        predictions = self.output_projection(output_features).squeeze(-1)
-        # [batch_size, output_dim]
-        
-        return predictions
+
+        base = self.base_features.unsqueeze(0).expand(batch_size, -1, -1)
+        dynamic = torch.zeros(batch_size, self.num_cells, self.dynamic_dim, device=x.device)
+        dynamic[torch.arange(batch_size, device=x.device), entity_indices] = x
+        inputs = torch.cat([base, dynamic], dim=-1)
+
+        hidden = self.input_projection(inputs)
+        positions = self.base_positions.unsqueeze(0).expand(batch_size, -1, -1)
+
+        edge_indices, node_degrees = self._edge_tensors()
+        for layer in self.layers:
+            hidden, positions = layer(hidden, positions, edge_indices, node_degrees)
+
+        entity_embeddings = hidden[torch.arange(batch_size, device=x.device), entity_indices]
+        return self.output_projection(entity_embeddings)
 
 
-class SimplifiedETNNBaseline(BaseBaseline):
+class SimplifiedETNNBaseline(BaselineModel):
     """
     Simplified ETNN baseline that focuses on geometric invariants
     without full combinatorial complex machinery.
@@ -392,7 +524,7 @@ class SimplifiedETNNBaseline(BaseBaseline):
             epochs: Training epochs
             device: Device to use
         """
-        super().__init__()
+        super().__init__(name="Simplified_ETNN")
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.learning_rate = learning_rate
@@ -402,18 +534,35 @@ class SimplifiedETNNBaseline(BaseBaseline):
         self.model = None
         self.scaler_features = None
         self.scaler_targets = None
+        self._target_is_vector = False
     
     def fit(self, 
             X_train: np.ndarray, 
             y_train: np.ndarray,
-            hierarchy_info: Optional[Dict[str, Any]] = None) -> None:
+            hierarchy: Optional[Dict[str, Any]] = None,
+            hierarchy_info: Optional[Dict[str, Any]] = None,
+            **kwargs) -> None:
         """Train the simplified ETNN model."""
         from sklearn.preprocessing import StandardScaler
         
+        # Ensure array shapes are compatible with scikit-learn scalers
+        X_train = np.asarray(X_train)
+        if X_train.ndim == 1:
+            X_train = X_train.reshape(-1, 1)
+
+        y_train = np.asarray(y_train)
+        if y_train.ndim == 1:
+            y_train = y_train.reshape(-1, 1)
+
+        self._target_is_vector = y_train.shape[1] == 1
+
+        # Prefer explicitly provided hierarchy, fall back to legacy name
+        hierarchy_info = hierarchy or hierarchy_info
+
         # Standardize data
         self.scaler_features = StandardScaler()
         self.scaler_targets = StandardScaler()
-        
+
         X_scaled = self.scaler_features.fit_transform(X_train)
         y_scaled = self.scaler_targets.fit_transform(y_train)
         
@@ -443,11 +592,15 @@ class SimplifiedETNNBaseline(BaseBaseline):
             if (epoch + 1) % 10 == 0:
                 print(f"Simplified ETNN Epoch {epoch + 1}/{self.epochs}, Loss: {loss.item():.6f}")
     
-    def predict(self, X_test: np.ndarray) -> np.ndarray:
+    def predict(self, X_test: np.ndarray, **kwargs) -> np.ndarray:
         """Make predictions with simplified ETNN model."""
         if self.model is None:
             raise ValueError("Model not trained. Call fit() first.")
-        
+
+        X_test = np.asarray(X_test)
+        if X_test.ndim == 1:
+            X_test = X_test.reshape(-1, 1)
+
         X_scaled = self.scaler_features.transform(X_test)
         X_tensor = torch.FloatTensor(X_scaled).to(self.device)
         
@@ -458,6 +611,9 @@ class SimplifiedETNNBaseline(BaseBaseline):
                 predictions_scaled.cpu().numpy()
             )
         
+        if self._target_is_vector:
+            return predictions.ravel()
+
         return predictions
     
     def get_name(self) -> str:

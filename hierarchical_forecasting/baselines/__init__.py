@@ -14,6 +14,7 @@ from .prophet_baseline import ProphetBaseline, HierarchicalProphet
 from .hierarchical_methods import BottomUpBaseline, TopDownBaseline, MiddleOutBaseline
 from .mint import MinTBaseline, OLSBaseline
 from .etnn_baseline import ETNNBaseline, SimplifiedETNNBaseline
+from .transformer_baselines import TemporalTransformerBaseline, PretrainedTransformerBaseline
 
 __all__ = [
     'BaselineModel',
@@ -32,5 +33,7 @@ __all__ = [
     'MinTBaseline',
     'OLSBaseline',
     'ETNNBaseline',
-    'SimplifiedETNNBaseline'
+    'SimplifiedETNNBaseline',
+    'TemporalTransformerBaseline',
+    'PretrainedTransformerBaseline'
 ]

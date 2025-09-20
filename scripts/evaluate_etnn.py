@@ -28,7 +28,8 @@ from hierarchical_forecasting.models import (
 )
 from hierarchical_forecasting.data import DataPreprocessor, HierarchicalDataLoader
 from hierarchical_forecasting.baselines import ETNNBaseline, SimplifiedETNNBaseline
-from hierarchical_forecasting.visualization import MetricsVisualizer
+from hierarchical_forecasting.baselines import TemporalTransformerBaseline, PretrainedTransformerBaseline
+from hierarchical_forecasting.visualization import TrainingVisualizer
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 
@@ -97,6 +98,21 @@ def create_etnn_models() -> Dict[str, Any]:
             use_geometric_features=True,
             epochs=75
         ),
+        'Temporal_Transformer': TemporalTransformerBaseline(
+            sequence_length=6,
+            d_model=128,
+            nhead=4,
+            num_layers=3,
+            epochs=40
+        ),
+        'Foundation_Transformer': PretrainedTransformerBaseline(
+            sequence_length=6,
+            d_model=256,
+            nhead=8,
+            num_layers=4,
+            epochs=20,
+            freeze_encoder=True
+        ),
         'Simplified_ETNN': SimplifiedETNNBaseline(
             hidden_dim=32,
             num_layers=3,
@@ -143,19 +159,49 @@ def run_etnn_evaluation(data_path: str, output_dir: str = "outputs/etnn_evaluati
     # Initialize data preprocessor
     preprocessor = DataPreprocessor()
     
-    # Create hierarchy, features, and targets
-    hierarchy = preprocessor.create_hierarchy(df)
-    features_df = preprocessor.create_features(df)
-    targets_df = preprocessor.create_targets(df)
+    # Create merged data with features and targets
+    data = preprocessor.prepare_data(df)
     
-    # Split data
-    train_data, val_data, test_data = preprocessor.split_data(
-        features_df, targets_df, train_ratio=0.8, val_ratio=0.1
-    )
+    # Split data chronologically
+    train_data, val_data, test_data = preprocessor.split_data(data, test_period=30, val_period=30)
     
-    X_train, y_train = train_data
-    X_val, y_val = val_data
-    X_test, y_test = test_data
+    # Process each split
+    def prepare_split_data(split_data):
+        features = preprocessor.create_features(split_data)
+        targets = preprocessor.create_targets(split_data)
+        hierarchy = preprocessor.create_hierarchy(split_data)
+        
+        # Find numeric columns only (exclude date and entity_id)
+        numeric_cols = []
+        for col in features.columns:
+            if col in ['date', 'entity_id']:
+                continue
+            try:
+                pd.to_numeric(features[col])
+                numeric_cols.append(col)
+            except:
+                continue
+        
+        # Convert to numpy arrays using only numeric columns
+        features_array = features[numeric_cols].values.astype(np.float32)
+        targets_array = targets.values.astype(np.float32)
+        entities = hierarchy.get(0, list(range(targets_array.shape[1])))
+        if isinstance(entities, list):
+            resolved_entities = []
+            for ent in entities:
+                if isinstance(ent, tuple):
+                    resolved_entities.append(ent)
+                elif isinstance(ent, list):
+                    resolved_entities.append(tuple(ent))
+                else:
+                    resolved_entities.append((ent,))
+            entities = resolved_entities
+        levels = [len(ent) - 1 if isinstance(ent, tuple) else 0 for ent in entities]
+        return features_array, targets_array, levels, entities
+    
+    X_train, y_train, levels_train, entities_train = prepare_split_data(train_data)
+    X_val, y_val, levels_val, entities_val = prepare_split_data(val_data)
+    X_test, y_test, levels_test, entities_test = prepare_split_data(test_data)
     
     print(f"📊 Data split:")
     print(f"  - Training: {X_train.shape[0]} samples")
@@ -164,8 +210,8 @@ def run_etnn_evaluation(data_path: str, output_dir: str = "outputs/etnn_evaluati
     
     # Create hierarchy information
     hierarchy_info = {
-        'entities': list(range(y_train.shape[1])),
-        'levels': [0] * (y_train.shape[1] // 2) + [1] * (y_train.shape[1] - y_train.shape[1] // 2)
+        'entities': entities_train,
+        'levels': levels_train
     }
     
     # Create ETNN models
@@ -184,16 +230,21 @@ def run_etnn_evaluation(data_path: str, output_dir: str = "outputs/etnn_evaluati
             
             # Train model
             print(f"Training {model_name}...")
-            model.fit(X_train, y_train, hierarchy_info=hierarchy_info)
+            model.fit(
+                X_train,
+                y_train,
+                hierarchy_info=hierarchy_info,
+                entity_ids=entities_train
+            )
             
             # Make predictions
             print(f"Making predictions with {model_name}...")
-            y_pred = model.predict(X_test)
+            y_pred = model.predict(X_test, entity_ids=entities_test)
             
             training_time = time.time() - start_time
             
             # Evaluate metrics
-            metrics = evaluate_hierarchical_metrics(y_test, y_pred, hierarchy_info['levels'])
+            metrics = evaluate_hierarchical_metrics(y_test, y_pred, levels_test)
             
             # Add model info to metrics
             metrics['Model'] = model_name
@@ -268,17 +319,35 @@ def run_hybrid_etnn_ccmpn_evaluation(data_path: str, output_dir: str = "outputs/
     df = pd.read_csv(data_path, parse_dates=['date'])
     preprocessor = DataPreprocessor()
     
-    # Create features and targets
-    features_df = preprocessor.create_features(df)
-    targets_df = preprocessor.create_targets(df)
+    # Create merged data with features and targets
+    data = preprocessor.prepare_data(df)
     
-    # Split data
-    train_data, val_data, test_data = preprocessor.split_data(
-        features_df, targets_df, train_ratio=0.8, val_ratio=0.1
-    )
+    # Split data chronologically
+    train_data, val_data, test_data = preprocessor.split_data(data, test_period=30, val_period=30)
     
-    X_train, y_train = train_data
-    X_test, y_test = test_data
+    # Process training and test splits
+    def prepare_split_data(split_data):
+        features = preprocessor.create_features(split_data)
+        targets = preprocessor.create_targets(split_data)
+        
+        # Find numeric columns only (exclude date and entity_id)
+        numeric_cols = []
+        for col in features.columns:
+            if col in ['date', 'entity_id']:
+                continue
+            try:
+                pd.to_numeric(features[col])
+                numeric_cols.append(col)
+            except:
+                continue
+        
+        # Convert to numpy arrays using only numeric columns
+        features_array = features[numeric_cols].values.astype(np.float32)
+        targets_array = targets.values.astype(np.float32)
+        return features_array, targets_array
+    
+    X_train, y_train = prepare_split_data(train_data)
+    X_test, y_test = prepare_split_data(test_data)
     
     # Create configuration
     config = ModelConfig()
