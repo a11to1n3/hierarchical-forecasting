@@ -452,7 +452,12 @@ class ETNNForecastingModel(nn.Module):
 
         self.input_projection = nn.Linear(self.base_dim + self.dynamic_dim, hidden_dim)
         self.layers = nn.ModuleList([
-            ETNNLayer(hidden_dim, neighborhood_names, use_position_update=use_position_update)
+            ETNNLayer(
+                hidden_dim,
+                neighborhood_names,
+                cell_to_nodes=combinatorial_complex.cell_to_nodes,
+                use_position_update=use_position_update
+            )
             for _ in range(num_layers)
         ])
         self.output_projection = nn.Sequential(
@@ -500,4 +505,3 @@ class ETNNForecastingModel(nn.Module):
 
         entity_embeddings = hidden[torch.arange(batch_size, device=x.device), entity_indices]
         return self.output_projection(entity_embeddings)
-

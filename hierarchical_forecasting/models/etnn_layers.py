@@ -7,7 +7,7 @@ while maintaining E(n) equivariance for geometric features.
 
 import torch
 import torch.nn as nn
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 
 class GeometricInvariants:
@@ -89,6 +89,7 @@ class ETNNLayer(nn.Module):
         self,
         hidden_dim: int,
         neighborhood_names: Iterable[str],
+        cell_to_nodes: Optional[List[List[int]]] = None,
         use_position_update: bool = True,
     ) -> None:
         super().__init__()
@@ -96,13 +97,22 @@ class ETNNLayer(nn.Module):
         self.hidden_dim = hidden_dim
         self.neighborhood_names = list(neighborhood_names)
         self.use_position_update = use_position_update
+        self.num_invariant_terms = 3  # pairwise distance, centroid distance, Hausdorff distance
 
         self.message_functions = nn.ModuleDict()
         self.position_functions = nn.ModuleDict()
+        self.cell_to_nodes: Dict[int, torch.Tensor] = {}
+
+        if cell_to_nodes is not None:
+            for idx, nodes in enumerate(cell_to_nodes):
+                if nodes:
+                    self.cell_to_nodes[idx] = torch.tensor(nodes, dtype=torch.long)
+                else:
+                    self.cell_to_nodes[idx] = torch.tensor([], dtype=torch.long)
 
         for name in self.neighborhood_names:
             self.message_functions[name] = nn.Sequential(
-                nn.Linear(2 * hidden_dim + 1, hidden_dim),
+                nn.Linear(2 * hidden_dim + self.num_invariant_terms, hidden_dim),
                 nn.SiLU(),
                 nn.Linear(hidden_dim, hidden_dim)
             )
@@ -118,6 +128,29 @@ class ETNNLayer(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
+
+    def _gather_cell_positions(self, positions: torch.Tensor, cell_idx: int) -> torch.Tensor:
+        indices = self.cell_to_nodes.get(cell_idx)
+        if indices is None or indices.numel() == 0:
+            return positions[:, cell_idx:cell_idx + 1, :]
+        if indices.device != positions.device:
+            indices = indices.to(positions.device)
+            self.cell_to_nodes[cell_idx] = indices
+        return positions.index_select(1, indices)
+
+    @staticmethod
+    def _centroid_distance(src_pos: torch.Tensor, dst_pos: torch.Tensor) -> torch.Tensor:
+        centroid_src = src_pos.mean(dim=1)
+        centroid_dst = dst_pos.mean(dim=1)
+        return torch.norm(centroid_src - centroid_dst, dim=-1, keepdim=True)
+
+    @staticmethod
+    def _hausdorff_distance(src_pos: torch.Tensor, dst_pos: torch.Tensor) -> torch.Tensor:
+        diff = src_pos.unsqueeze(2) - dst_pos.unsqueeze(1)
+        distances = torch.norm(diff, dim=-1)
+        forward = distances.min(dim=2)[0].max(dim=1)[0]
+        backward = distances.min(dim=1)[0].max(dim=1)[0]
+        return torch.max(forward, backward).unsqueeze(-1)
 
     def forward(
         self,
@@ -146,7 +179,19 @@ class ETNNLayer(nn.Module):
             rel_pos = positions[:, src, :] - positions[:, dst, :]
             distances = torch.norm(rel_pos, dim=-1, keepdim=True)
 
-            msg_input = torch.cat([h_src, h_dst, distances], dim=-1)
+            centroid_terms: List[torch.Tensor] = []
+            hausdorff_terms: List[torch.Tensor] = []
+            for s_idx, d_idx in zip(src.tolist(), dst.tolist()):
+                src_pos = self._gather_cell_positions(positions, s_idx)
+                dst_pos = self._gather_cell_positions(positions, d_idx)
+                centroid_terms.append(self._centroid_distance(src_pos, dst_pos))
+                hausdorff_terms.append(self._hausdorff_distance(src_pos, dst_pos))
+
+            centroid_tensor = torch.stack(centroid_terms, dim=1)
+            hausdorff_tensor = torch.stack(hausdorff_terms, dim=1)
+            invariants = torch.cat([distances, centroid_tensor, hausdorff_tensor], dim=-1)
+
+            msg_input = torch.cat([h_src, h_dst, invariants], dim=-1)
             messages = self.message_functions[name](msg_input)
 
             aggregated = torch.zeros_like(features)
