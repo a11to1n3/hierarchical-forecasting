@@ -2,8 +2,8 @@
 
 This module provides two high-capacity baselines:
 
-* :class:`PatchTSTBaseline` – a thin wrapper that loads an officially trained
-  PatchTST TorchScript or nn.Module checkpoint and uses it in evaluation mode.
+* :class:`PatchTSTBaseline` – optionally loads an official PatchTST checkpoint,
+  but can also be trained or fine-tuned directly on local features.
 * :class:`TimesNetBaseline` – a PyTorch re-implementation of TimesNet adapted
   from the authors' public repository (https://github.com/thuml/Time-Series-Library).
 
@@ -46,55 +46,144 @@ def _sinusoidal_embedding(length: int, dim: int, device: torch.device) -> torch.
 
 
 class PatchTSTBaseline(BaselineModel):
-    """Baseline that relies on an externally trained PatchTST checkpoint.
+    """PatchTST baseline with optional checkpoint loading and fine-tuning."""
 
-    The checkpoint must be supplied as a TorchScript module (``torch.jit``) or
-    as a serialized ``nn.Module``. No fine-tuning is performed inside this
-    project to keep the evaluation faithful to the published model.
-    """
-
-    def __init__(self, checkpoint_path: str, device: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        checkpoint_path: Optional[str] = None,
+        patch_len: int = 16,
+        stride: int = 8,
+        d_model: int = 128,
+        nhead: int = 4,
+        num_layers: int = 3,
+        dropout: float = 0.1,
+        epochs: int = 40,
+        batch_size: int = 128,
+        learning_rate: float = 1e-3,
+        weight_decay: float = 1e-4,
+        allow_training: bool = True,
+        device: Optional[str] = None,
+    ) -> None:
         super().__init__(name="PatchTST")
-        if not checkpoint_path:
-            raise ValueError("`checkpoint_path` must point to a valid PatchTST checkpoint.")
         self.checkpoint_path = checkpoint_path
+        self.patch_len = patch_len
+        self.stride = stride
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_layers = num_layers
+        self.dropout = dropout
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.allow_training = allow_training
         self.device = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
-        self.model: Optional[torch.nn.Module] = None
+
+        self.model: Optional[PatchTSTRegressor] = None
+        self._seq_len: Optional[int] = None
+
+    def _prepare_dataset(self, X: np.ndarray, y: np.ndarray) -> TensorDataset:
+        X_tensor = torch.from_numpy(X.astype(np.float32))
+        y_tensor = torch.from_numpy(y.astype(np.float32))
+        return TensorDataset(X_tensor, y_tensor)
+
+    def _build_model(self, seq_len: int) -> PatchTSTRegressor:
+        return PatchTSTRegressor(
+            input_dim=seq_len,
+            patch_len=self.patch_len,
+            stride=self.stride,
+            d_model=self.d_model,
+            nhead=self.nhead,
+            num_layers=self.num_layers,
+            dropout=self.dropout,
+        ).to(self.device)
 
     def fit(self, X: np.ndarray, y: np.ndarray,
             hierarchy: Optional[dict] = None, **kwargs) -> 'PatchTSTBaseline':
-        if self.model is None:
+        if X.ndim != 2:
+            raise ValueError("PatchTSTBaseline expects 2D input [n_samples, seq_len].")
+
+        self._seq_len = X.shape[1]
+
+        # If a checkpoint is provided, try to load it first.
+        if self.checkpoint_path:
             try:
                 module = torch.jit.load(self.checkpoint_path, map_location=self.device)
                 self.model = module
+                self.model.eval()
+                self.is_fitted = True
+                if not self.allow_training:
+                    return self
             except (RuntimeError, FileNotFoundError):
                 try:
-                    state_obj = torch.load(self.checkpoint_path, map_location=self.device)
+                    state = torch.load(self.checkpoint_path, map_location=self.device)
+                    if isinstance(state, torch.nn.Module):
+                        self.model = state.to(self.device)
+                        self.model.eval()
+                        self.is_fitted = True
+                        if not self.allow_training:
+                            return self
+                    else:
+                        raise RuntimeError
                 except FileNotFoundError as exc:
                     raise FileNotFoundError(
                         f"PatchTST checkpoint not found at {self.checkpoint_path}."
                     ) from exc
-
-                if isinstance(state_obj, torch.nn.Module):
-                    self.model = state_obj
-                else:
+                except RuntimeError:
                     raise RuntimeError(
-                        "PatchTSTBaseline expects a TorchScript module or serialized nn.Module."
-                        " Export the official model and pass its path via `checkpoint_path`."
+                        "Unable to load PatchTST checkpoint. Provide a TorchScript module or nn.Module."
                     )
 
-                self.model.to(self.device)
+        # Train (or fine-tune) locally if allowed.
+        if not self.allow_training and self.model is None:
+            raise RuntimeError(
+                "No valid checkpoint provided for PatchTSTBaseline and training is disabled."
+            )
 
-            self.model.eval()
+        if self.model is None or self.allow_training:
+            self.model = self._build_model(self._seq_len)
 
+            dataset = self._prepare_dataset(X, y)
+            loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+            optimizer = torch.optim.AdamW(
+                self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
+            )
+            criterion = nn.MSELoss()
+
+            self.model.train()
+            for epoch in range(self.epochs):
+                total_loss = 0.0
+                total = 0
+                for features, targets in loader:
+                    features = features.to(self.device)
+                    targets = targets.to(self.device).unsqueeze(-1)
+
+                    optimizer.zero_grad()
+                    preds = self.model(features)
+                    loss = criterion(preds, targets)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    optimizer.step()
+
+                    batch_size = features.size(0)
+                    total_loss += loss.item() * batch_size
+                    total += batch_size
+
+                if (epoch + 1) % max(self.epochs // 5, 1) == 0:
+                    avg_loss = total_loss / max(total, 1)
+                    print(f"[PatchTST] Epoch {epoch + 1}/{self.epochs} - Loss: {avg_loss:.6f}")
+
+        self.model.eval()
         self.is_fitted = True
         return self
 
     def predict(self, X: np.ndarray, **kwargs) -> np.ndarray:
         if not self.is_fitted or self.model is None:
-            raise ValueError("PatchTSTBaseline must load a checkpoint before prediction.")
+            raise ValueError("PatchTSTBaseline must be fitted before prediction.")
 
         tensor = torch.from_numpy(X.astype(np.float32)).to(self.device)
+        self.model.eval()
         with torch.no_grad():
             preds = self.model(tensor)
         return preds.detach().cpu().numpy().reshape(-1)
