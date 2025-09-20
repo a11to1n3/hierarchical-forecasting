@@ -78,7 +78,8 @@ def create_baseline_models(input_size: int,
     if patchtst_checkpoint:
         baselines['PatchTST'] = PatchTSTBaseline(checkpoint_path=patchtst_checkpoint)
     else:
-        print("Skipping PatchTST baseline (no checkpoint provided).")
+        print("No PatchTST checkpoint provided; training a fresh PatchTST baseline from scratch.")
+        baselines['PatchTST'] = PatchTSTBaseline(allow_training=True)
 
     baselines['TimesNet'] = TimesNetBaseline()
 
