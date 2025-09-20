@@ -735,14 +735,19 @@ def main():
     )
     
     # Print summary
-    print("\n" + "="*80)
+    separator_width = 120
+    print("\n" + "="*separator_width)
     print("BASELINE COMPARISON RESULTS")
-    print("="*80)
-    print(f"{'Model':<25} {'Test R²':<10} {'Test RMSE':<12} {'Training Time':<15}")
-    print("-"*80)
+    print("="*separator_width)
+    print(f"{'Model':<25} {'Test R²':<10} {'Test RMSE':<12} {'Test WAPE':<12} {'Test WASE':<12} {'Training Time':<15}")
+    print("-"*separator_width)
     
     for _, row in results_df.head(10).iterrows():
-        print(f"{row['Model']:<25} {row['Test_R2']:<10.4f} {row['Test_RMSE']:<12.2f} {row['Training_Time']:<15.1f}s")
+        wape = row.get('Test_WAPE', np.nan)
+        wase = row.get('Test_WASE', np.nan)
+        wape_str = f"{wape:.2f}%" if not np.isnan(wape) else 'N/A'
+        wase_str = f"{wase:.4f}" if not np.isnan(wase) else 'N/A'
+        print(f"{row['Model']:<25} {row['Test_R2']:<10.4f} {row['Test_RMSE']:<12.2f} {wape_str:<12} {wase_str:<12} {row['Training_Time']:<15.1f}s")
     
     # Print hierarchical results for top 3 models
     print("\n" + "="*80)
