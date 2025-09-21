@@ -46,6 +46,13 @@ def evaluate_hierarchical_metrics(
 
     metrics: Dict[str, float] = {}
 
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    if y_true.ndim > 1:
+        y_true = y_true.reshape(-1)
+    if y_pred.ndim > 1:
+        y_pred = y_pred.reshape(-1)
+
     metrics['Overall_WAPE'] = weighted_absolute_percentage_error(y_true, y_pred)
     metrics['Overall_WPE'] = weighted_percentage_error(y_true, y_pred)
     metrics['Overall_MAE'] = mean_absolute_error(y_true, y_pred)
@@ -58,8 +65,8 @@ def evaluate_hierarchical_metrics(
             level_mask = [idx for idx, lvl in enumerate(hierarchy_levels) if lvl == level]
             if not level_mask:
                 continue
-            level_true = y_true[:, level_mask]
-            level_pred = y_pred[:, level_mask]
+            level_true = y_true[level_mask]
+            level_pred = y_pred[level_mask]
             metrics[f'Level_{level}_WAPE'] = weighted_absolute_percentage_error(level_true, level_pred)
             metrics[f'Level_{level}_WPE'] = weighted_percentage_error(level_true, level_pred)
             metrics[f'Level_{level}_MAE'] = mean_absolute_error(level_true, level_pred)
