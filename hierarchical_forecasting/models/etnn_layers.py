@@ -240,6 +240,8 @@ class ETNNLayer(nn.Module):
 
             msg_input = torch.cat([h_src, h_dst, invariants], dim=-1)
             messages = self.message_functions[name](msg_input)
+            if messages.dtype != features.dtype:
+                messages = messages.to(features.dtype)
 
             aggregated = torch.zeros_like(features)
             aggregated.index_add_(1, dst, messages)
