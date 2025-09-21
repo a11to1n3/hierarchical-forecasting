@@ -33,7 +33,7 @@ class ETNNBaseline(BaselineModel):
                  use_geometric_features: bool = True,
                  learning_rate: float = 0.001,
                  epochs: int = 150,
-                 batch_size: int = 128,
+                 batch_size: int = 64,
                  device: Optional[str] = None):
         """
         Initialize ETNN baseline.
