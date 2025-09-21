@@ -125,6 +125,15 @@ def evaluate_hierarchical_metrics(
             y_pred = y_pred.reshape(-1)
         results: Dict[str, float] = {}
 
+        def _to_tuple(entity: Any) -> Tuple[Any, ...]:
+            if isinstance(entity, tuple):
+                return entity
+            if isinstance(entity, np.ndarray):
+                return tuple(entity.tolist())
+            if isinstance(entity, list):
+                return tuple(entity)
+            return (entity,)
+
         results['Overall_WAPE'] = weighted_absolute_percentage_error(y_true, y_pred)
         results['Overall_WPE'] = weighted_percentage_error(y_true, y_pred)
         results['Overall_MAE'] = mean_absolute_error(y_true, y_pred)
@@ -146,9 +155,10 @@ def evaluate_hierarchical_metrics(
                 results[f'Level_{level}_R2'] = r2_score(level_true, level_pred)
 
         if entities_test is not None and hierarchy is not None:
+            tuple_entities = [_to_tuple(entity) for entity in entities_test]
             for rank in range(4):
                 if rank == 0:
-                    mask = np.array([entity in hierarchy[0] for entity in entities_test])
+                    mask = np.array([entity in hierarchy[0] for entity in tuple_entities], dtype=bool)
                     if mask.sum() > 0:
                         level_pred = y_pred[mask]
                         level_true = y_true[mask]
@@ -160,7 +170,7 @@ def evaluate_hierarchical_metrics(
                     level_pred_list = []
                     level_true_list = []
                     for store in store_entities:
-                        sku_mask = np.array([entity[:2] == store for entity in entities_test])
+                        sku_mask = np.array([entity[:2] == store for entity in tuple_entities], dtype=bool)
                         if sku_mask.sum() > 0:
                             level_pred_list.append(y_pred[sku_mask].sum())
                             level_true_list.append(y_true[sku_mask].sum())
@@ -174,7 +184,7 @@ def evaluate_hierarchical_metrics(
                     level_pred_list = []
                     level_true_list = []
                     for company in company_entities:
-                        sku_mask = np.array([entity[0] == company[0] for entity in entities_test])
+                        sku_mask = np.array([entity[0] == company[0] for entity in tuple_entities], dtype=bool)
                         if sku_mask.sum() > 0:
                             level_pred_list.append(y_pred[sku_mask].sum())
                             level_true_list.append(y_true[sku_mask].sum())

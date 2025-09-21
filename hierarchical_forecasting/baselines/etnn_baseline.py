@@ -55,7 +55,13 @@ class ETNNBaseline(BaselineModel):
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.batch_size = batch_size
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        if device is None:
+            resolved = 'cuda' if torch.cuda.is_available() else 'cpu'
+        elif isinstance(device, torch.device):
+            resolved = device.type
+        else:
+            resolved = str(device)
+        self.device = torch.device(resolved)
         
         self.model = None
         self.feature_dim = None
