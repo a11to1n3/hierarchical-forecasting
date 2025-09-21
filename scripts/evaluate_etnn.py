@@ -31,49 +31,41 @@ from hierarchical_forecasting.baselines import ETNNBaseline
 from hierarchical_forecasting.baselines import PatchTSTBaseline, TimesNetBaseline
 from hierarchical_forecasting.utils import (
     weighted_absolute_percentage_error,
-    weighted_absolute_squared_error,
+    weighted_percentage_error,
 )
 from hierarchical_forecasting.visualization import TrainingVisualizer
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 
-def evaluate_hierarchical_metrics(y_true: np.ndarray, y_pred: np.ndarray, 
-                                hierarchy_levels: Optional[List[int]] = None) -> Dict[str, float]:
-    """
-    Evaluate hierarchical metrics at different levels.
-    
-    Args:
-        y_true: True values [num_samples, num_entities]
-        y_pred: Predicted values [num_samples, num_entities]
-        hierarchy_levels: List of hierarchy levels for each entity
-        
-    Returns:
-        Dictionary of metrics by hierarchy level
-    """
-    metrics = {}
-    
-    # Overall metrics
+def evaluate_hierarchical_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    hierarchy_levels: Optional[List[int]] = None,
+) -> Dict[str, float]:
+    """Evaluate hierarchical metrics for ETNN evaluation on original-scale values."""
+
+    metrics: Dict[str, float] = {}
+
     metrics['Overall_WAPE'] = weighted_absolute_percentage_error(y_true, y_pred)
-    metrics['Overall_WASE'] = weighted_absolute_squared_error(y_true, y_pred)
+    metrics['Overall_WPE'] = weighted_percentage_error(y_true, y_pred)
     metrics['Overall_MAE'] = mean_absolute_error(y_true, y_pred)
     metrics['Overall_RMSE'] = np.sqrt(mean_squared_error(y_true, y_pred))
     metrics['Overall_R2'] = r2_score(y_true, y_pred)
-    
-    # Hierarchical metrics if levels are provided
+
     if hierarchy_levels is not None:
         unique_levels = sorted(set(hierarchy_levels))
         for level in unique_levels:
-            level_mask = [i for i, l in enumerate(hierarchy_levels) if l == level]
-            if len(level_mask) > 0:
-                y_true_level = y_true[:, level_mask]
-                y_pred_level = y_pred[:, level_mask]
-                
-                metrics[f'Level_{level}_WAPE'] = weighted_absolute_percentage_error(y_true_level, y_pred_level)
-                metrics[f'Level_{level}_WASE'] = weighted_absolute_squared_error(y_true_level, y_pred_level)
-                metrics[f'Level_{level}_MAE'] = mean_absolute_error(y_true_level, y_pred_level)
-                metrics[f'Level_{level}_RMSE'] = np.sqrt(mean_squared_error(y_true_level, y_pred_level))
-                metrics[f'Level_{level}_R2'] = r2_score(y_true_level, y_pred_level)
-    
+            level_mask = [idx for idx, lvl in enumerate(hierarchy_levels) if lvl == level]
+            if not level_mask:
+                continue
+            level_true = y_true[:, level_mask]
+            level_pred = y_pred[:, level_mask]
+            metrics[f'Level_{level}_WAPE'] = weighted_absolute_percentage_error(level_true, level_pred)
+            metrics[f'Level_{level}_WPE'] = weighted_percentage_error(level_true, level_pred)
+            metrics[f'Level_{level}_MAE'] = mean_absolute_error(level_true, level_pred)
+            metrics[f'Level_{level}_RMSE'] = np.sqrt(mean_squared_error(level_true, level_pred))
+            metrics[f'Level_{level}_R2'] = r2_score(level_true, level_pred)
+
     return metrics
 
 
@@ -235,7 +227,11 @@ def run_etnn_evaluation(
             training_time = time.time() - start_time
             
             # Evaluate metrics
-            metrics = evaluate_hierarchical_metrics(y_test, y_pred, levels_test)
+            metrics = evaluate_hierarchical_metrics(
+                y_true=y_test,
+                y_pred=y_pred,
+                hierarchy_levels=levels_test
+            )
             
             # Add model info to metrics
             metrics['Model'] = model_name
@@ -246,7 +242,7 @@ def run_etnn_evaluation(
             print(f"✅ {model_name} completed:")
             print(f"   - Training time: {training_time:.2f}s")
             print(f"   - Overall WAPE: {metrics['Overall_WAPE']:.4f}%")
-            print(f"   - Overall WASE: {metrics['Overall_WASE']:.6f}")
+            print(f"   - Overall WPE: {metrics['Overall_WPE']:.6f}")
             print(f"   - Overall RMSE: {metrics['Overall_RMSE']:.4f}")
             print(f"   - Overall R²: {metrics['Overall_R2']:.4f}")
             
@@ -257,7 +253,7 @@ def run_etnn_evaluation(
                 'Model': model_name,
                 'Training_Time': 0,
                 'Overall_WAPE': float('inf'),
-                'Overall_WASE': float('inf'),
+                'Overall_WPE': float('inf'),
                 'Overall_MAE': float('inf'),
                 'Overall_RMSE': float('inf'),
                 'Overall_R2': -float('inf'),
@@ -280,7 +276,7 @@ def run_etnn_evaluation(
     
     if len(results_df) > 0:
         # Sort by overall WAPE (lower is better)
-        summary_df = results_df[['Model', 'Overall_WAPE', 'Overall_WASE', 'Overall_RMSE', 'Overall_R2', 'Training_Time']].copy()
+        summary_df = results_df[['Model', 'Overall_WAPE', 'Overall_WPE', 'Overall_RMSE', 'Overall_R2', 'Training_Time']].copy()
         summary_df = summary_df.sort_values('Overall_WAPE')
         
         print(summary_df.to_string(index=False, float_format='%.4f'))
@@ -288,10 +284,10 @@ def run_etnn_evaluation(
         # Best model
         best_model = summary_df.iloc[0]['Model']
         best_wape = summary_df.iloc[0]['Overall_WAPE']
-        best_wase = summary_df.iloc[0]['Overall_WASE']
+        best_wpe = summary_df.iloc[0]['Overall_WPE']
         print(f"\n🏆 Best ETNN Model: {best_model}")
         print(f"   Best WAPE: {best_wape:.4f}%")
-        print(f"   Best WASE: {best_wase:.6f}")
+        print(f"   Best WPE: {best_wpe:.6f}")
     
     return results_df
 
@@ -419,12 +415,12 @@ def run_hybrid_etnn_ccmpn_evaluation(data_path: str, output_dir: str = "outputs/
             y_pred = pred_values.cpu().numpy()
     
     # Calculate metrics
-    metrics = evaluate_hierarchical_metrics(y_test, y_pred)
+    metrics = evaluate_hierarchical_metrics(y_true=y_test, y_pred=y_pred)
     metrics['Model'] = 'Hybrid_ETNN_CCMPN'
     
     print(f"✅ Hybrid ETNN-CCMPN Results:")
     print(f"   - Overall WAPE: {metrics['Overall_WAPE']:.4f}%")
-    print(f"   - Overall WASE: {metrics['Overall_WASE']:.6f}")
+    print(f"   - Overall WPE: {metrics['Overall_WPE']:.6f}")
     print(f"   - Overall RMSE: {metrics['Overall_RMSE']:.4f}")
     print(f"   - Overall R²: {metrics['Overall_R2']:.4f}")
     

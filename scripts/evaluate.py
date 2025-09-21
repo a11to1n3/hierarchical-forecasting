@@ -22,7 +22,7 @@ from hierarchical_forecasting.data import DataPreprocessor, HierarchicalDataLoad
 from hierarchical_forecasting.visualization import TrainingVisualizer
 from hierarchical_forecasting.utils import (
     weighted_absolute_percentage_error,
-    weighted_absolute_squared_error,
+    weighted_percentage_error,
 )
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 import warnings
@@ -127,7 +127,7 @@ def evaluate_model_detailed(model, test_data, cc, preprocessor, device):
         
         # Calculate comprehensive metrics
         wape = weighted_absolute_percentage_error(level_actuals, level_preds)
-        wase = weighted_absolute_squared_error(level_actuals, level_preds)
+        wpe = weighted_percentage_error(level_actuals, level_preds)
 
         mask = np.abs(level_actuals) > 0  # Avoid division by zero for other metrics
         if mask.sum() > 0:
@@ -147,7 +147,7 @@ def evaluate_model_detailed(model, test_data, cc, preprocessor, device):
         results.append({
             'Level': level_name,
             'WAPE': f'{wape:.2f}%' if not np.isnan(wape) else 'N/A',
-            'WASE': f'{wase:.2f}' if not np.isnan(wase) else 'N/A',
+            'WPE': f'{wpe:.2f}' if not np.isnan(wpe) else 'N/A',
             'R²': f'{r2:.3f}' if not np.isnan(r2) else 'N/A',
             'MAE': f'{mae:.2f}' if not np.isnan(mae) else 'N/A',
             'RMSE': f'{rmse:.2f}' if not np.isnan(rmse) else 'N/A',

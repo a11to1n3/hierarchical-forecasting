@@ -351,6 +351,8 @@ class ETNNBaseline(BaselineModel):
 
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         criterion = nn.MSELoss()
+        use_amp = self.device.type == 'cuda'
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
         dataset = TensorDataset(
             torch.FloatTensor(X_scaled),
@@ -378,13 +380,24 @@ class ETNNBaseline(BaselineModel):
                 entity_batch = entity_batch.to(self.device)
 
                 optimizer.zero_grad()
-                preds = self.model(features_batch, entity_batch)
-                loss = criterion(preds.squeeze(-1), targets_batch.squeeze(-1))
-                loss.backward()
-                optimizer.step()
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    preds = self.model(features_batch, entity_batch)
+                    loss = criterion(preds.squeeze(-1), targets_batch.squeeze(-1))
+
+                loss_value = loss.detach().item()
+
+                if use_amp:
+                    scaler.scale(loss).backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    optimizer.step()
 
                 batch_size = features_batch.size(0)
-                epoch_loss += loss.item() * batch_size
+                epoch_loss += loss_value * batch_size
                 total_samples += batch_size
 
             avg_loss = epoch_loss / max(1, total_samples)
@@ -477,11 +490,38 @@ class ETNNForecastingModel(nn.Module):
             )
             for _ in range(num_layers)
         ])
-        self.output_projection = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+        self.layer_norms = nn.ModuleList([nn.LayerNorm(hidden_dim) for _ in range(num_layers)])
+        self.dropout = nn.Dropout(0.1)
+
+        parent_indices: List[int] = []
+        for idx in range(self.num_cells):
+            cell = combinatorial_complex.int_to_cell[idx]
+            parent_cell = combinatorial_complex.parent_map.get(cell)
+            if parent_cell is None:
+                parent_indices.append(-1)
+            else:
+                parent_indices.append(combinatorial_complex.cell_to_int[parent_cell])
+        self.register_buffer('parent_indices', torch.tensor(parent_indices, dtype=torch.long))
+
+        self.lstm_readout = nn.LSTM(
+            input_size=hidden_dim,
+            hidden_size=hidden_dim,
+            num_layers=1,
+            batch_first=True,
+        )
+        self.dynamic_projection = nn.Sequential(
+            nn.Linear(self.dynamic_dim, hidden_dim),
             nn.SiLU(),
+        )
+        readout_dim = hidden_dim * 3
+        self.readout_norm = nn.LayerNorm(readout_dim)
+        self.output_projection = nn.Sequential(
+            nn.Linear(readout_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, 1)
         )
+        self.residual_projection = nn.Linear(self.dynamic_dim, 1)
 
         # Store edge indices and node degrees as buffers so they reside on the
         # correct device together with the model parameters.
@@ -517,8 +557,31 @@ class ETNNForecastingModel(nn.Module):
         positions = self.base_positions.unsqueeze(0).expand(batch_size, -1, -1)
 
         edge_indices, node_degrees = self._edge_tensors()
-        for layer in self.layers:
+        for layer, norm in zip(self.layers, self.layer_norms):
             hidden, positions = layer(hidden, positions, edge_indices, node_degrees)
+            hidden = norm(hidden)
+            hidden = self.dropout(hidden)
 
-        entity_embeddings = hidden[torch.arange(batch_size, device=x.device), entity_indices]
-        return self.output_projection(entity_embeddings)
+        batch_idx = torch.arange(batch_size, device=x.device)
+        entity_embeddings = hidden[batch_idx, entity_indices]
+
+        parent_idx = self.parent_indices[entity_indices]
+        parent_embeddings = torch.zeros_like(entity_embeddings)
+        valid_parent = parent_idx >= 0
+        if valid_parent.any():
+            parent_embeddings[valid_parent] = hidden[batch_idx[valid_parent], parent_idx[valid_parent]]
+
+        global_context = hidden.mean(dim=1)
+
+        sequence = torch.stack([entity_embeddings, parent_embeddings, global_context], dim=1)
+        lstm_out, (h_n, _) = self.lstm_readout(sequence)
+        lstm_hidden = h_n[-1]
+
+        dynamic_context = self.dynamic_projection(x)
+        readout_input = torch.cat([lstm_hidden, entity_embeddings, dynamic_context], dim=-1)
+        readout_input = self.readout_norm(readout_input)
+        readout_input = self.dropout(readout_input)
+
+        main_out = self.output_projection(readout_input)
+        residual_out = self.residual_projection(x)
+        return main_out + residual_out

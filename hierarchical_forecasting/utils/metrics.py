@@ -46,32 +46,35 @@ def weighted_absolute_percentage_error(
     return float(value)
 
 
-def weighted_absolute_squared_error(
+def weighted_percentage_error(
     y_true,
     y_pred,
     *,
+    percentage: bool = True,
     epsilon: float = 1e-12,
 ) -> float:
-    """Compute Weighted Absolute Squared Error (WASE).
+    """Compute Weighted Percentage Error (WPE).
 
-    WASE = sum(|y| * (y - ŷ)^2) / sum(|y|)
+    WPE = sum(y - ŷ) / sum(|y|)
 
     Args:
         y_true: Array-like of ground truth observations.
         y_pred: Array-like of predictions.
+        percentage: If True, return percentage (×100).
         epsilon: Small constant to guard against zero division.
 
     Returns:
-        Scalar WASE. Returns ``np.nan`` when the denominator is too small.
+        Scalar WPE (percentage if requested). Returns ``np.nan`` when the
+        denominator is too small.
     """
 
     y_true = _to_numpy(y_true)
     y_pred = _to_numpy(y_pred)
-    weights = np.abs(y_true)
-    denominator = np.sum(weights)
+    denominator = np.sum(np.abs(y_true))
     if denominator <= epsilon:
         return float('nan')
 
-    value = np.sum(weights * (y_true - y_pred) ** 2) / denominator
+    value = np.sum(y_true - y_pred) / denominator
+    if percentage:
+        value *= 100.0
     return float(value)
-

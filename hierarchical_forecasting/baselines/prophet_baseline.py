@@ -77,14 +77,13 @@ class ProphetBaseline(BaselineModel):
             entity_ids = self._normalise_entities(entity_ids)
 
         dates = pd.to_datetime(dates).to_numpy()
+        y = np.asarray(y)
 
         # Train separate Prophet model for each entity
         unique_entities = np.unique(entity_ids)
         
         for entity in unique_entities:
-            entity_mask = entity_ids == entity
-            if not isinstance(entity_mask, np.ndarray) or entity_mask.ndim != 1:
-                entity_mask = np.array([eid == entity for eid in entity_ids], dtype=bool)
+            entity_mask = self._entity_mask(entity_ids, entity)
 
             entity_dates = dates[entity_mask]
             entity_y = y[entity_mask]
@@ -172,9 +171,7 @@ class ProphetBaseline(BaselineModel):
         unique_entities = np.unique(entity_ids)
 
         for entity in unique_entities:
-            entity_mask = entity_ids == entity
-            if not isinstance(entity_mask, np.ndarray) or entity_mask.ndim != 1:
-                entity_mask = np.array([eid == entity for eid in entity_ids], dtype=bool)
+            entity_mask = self._entity_mask(entity_ids, entity)
             
             if entity in self.models:
                 entity_dates = dates[entity_mask]
@@ -219,16 +216,16 @@ class ProphetBaseline(BaselineModel):
         else:
             entity_ids = self._normalise_entities(entity_ids)
 
+        dates = pd.to_datetime(dates).to_numpy()
+
         predictions = np.zeros(len(dates))
         lower_bounds = np.zeros(len(dates))
         upper_bounds = np.zeros(len(dates))
-        
+
         unique_entities = np.unique(entity_ids)
         
         for entity in unique_entities:
-            entity_mask = entity_ids == entity
-            if not isinstance(entity_mask, np.ndarray) or entity_mask.ndim != 1:
-                entity_mask = np.array([eid == entity for eid in entity_ids], dtype=bool)
+            entity_mask = self._entity_mask(entity_ids, entity)
             
             if entity in self.models:
                 entity_dates = dates[entity_mask]
@@ -243,6 +240,12 @@ class ProphetBaseline(BaselineModel):
                 upper_bounds[entity_mask] = forecast['yhat_upper'].values
         
         return predictions, lower_bounds, upper_bounds
+
+    @staticmethod
+    def _entity_mask(entity_ids: np.ndarray, entity: Any) -> np.ndarray:
+        if isinstance(entity_ids, np.ndarray) and entity_ids.ndim == 1:
+            return np.array([eid == entity for eid in entity_ids], dtype=bool)
+        return np.array([eid == entity for eid in np.asarray(entity_ids, dtype=object)], dtype=bool)
     
     def get_params(self) -> Dict:
         """Get model parameters."""

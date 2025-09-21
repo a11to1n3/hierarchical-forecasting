@@ -11,75 +11,95 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 
 class GeometricInvariants:
-    """
-    Geometric invariant functions for ETNN layers.
-    Following the paper's geometric invariants for combinatorial complexes.
-    """
-    
+    """Geometric invariant functions for ETNN layers."""
+
+    _EPS = 1e-12
+
     @staticmethod
-    def pairwise_distances(pos_x: torch.Tensor, pos_y: torch.Tensor) -> torch.Tensor:
-        """
-        Compute sum of pairwise distances between two sets of positions.
-        
-        Args:
-            pos_x: Positions of nodes in cell x [num_nodes_x, dim]
-            pos_y: Positions of nodes in cell y [num_nodes_y, dim]
-            
-        Returns:
-            Sum of pairwise distances (scalar)
-        """
-        if pos_x.size(0) == 0 or pos_y.size(0) == 0:
-            return torch.tensor(0.0, device=pos_x.device)
-        
-        # Compute all pairwise distances
-        diff = pos_x.unsqueeze(1) - pos_y.unsqueeze(0)  # [num_x, num_y, dim]
-        distances = torch.norm(diff, dim=-1)  # [num_x, num_y]
-        return distances.sum()
-    
+    def _ensure_batch(pos: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if pos.dim() == 2:
+            pos = pos.unsqueeze(0)
+        if mask is not None:
+            if mask.dim() == 1:
+                mask = mask.unsqueeze(0)
+        return pos, mask
+
     @staticmethod
-    def centroid_distance(pos_x: torch.Tensor, pos_y: torch.Tensor) -> torch.Tensor:
-        """
-        Compute distance between centroids of two cells.
-        
-        Args:
-            pos_x: Positions of nodes in cell x [num_nodes_x, dim]
-            pos_y: Positions of nodes in cell y [num_nodes_y, dim]
-            
-        Returns:
-            Distance between centroids (scalar)
-        """
-        if pos_x.size(0) == 0 or pos_y.size(0) == 0:
-            return torch.tensor(0.0, device=pos_x.device)
-        
-        centroid_x = pos_x.mean(dim=0)  # [dim]
-        centroid_y = pos_y.mean(dim=0)  # [dim]
-        return torch.norm(centroid_x - centroid_y)
-    
+    def pairwise_distances(
+        pos_x: torch.Tensor,
+        pos_y: torch.Tensor,
+        mask_x: Optional[torch.Tensor] = None,
+        mask_y: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        pos_x, mask_x = GeometricInvariants._ensure_batch(pos_x, mask_x)
+        pos_y, mask_y = GeometricInvariants._ensure_batch(pos_y, mask_y)
+
+        distances = torch.cdist(pos_x, pos_y, p=2)
+
+        if mask_x is not None and mask_y is not None:
+            mask_x = mask_x.unsqueeze(-1)
+            mask_y = mask_y.unsqueeze(-2)
+            weight = mask_x * mask_y
+            return (distances * weight).sum(dim=(1, 2))
+
+        return distances.sum(dim=(1, 2))
+
     @staticmethod
-    def hausdorff_distance(pos_x: torch.Tensor, pos_y: torch.Tensor) -> torch.Tensor:
-        """
-        Compute Hausdorff distance between two sets of points.
-        
-        Args:
-            pos_x: Positions of nodes in cell x [num_nodes_x, dim]
-            pos_y: Positions of nodes in cell y [num_nodes_y, dim]
-            
-        Returns:
-            Hausdorff distance (scalar)
-        """
-        if pos_x.size(0) == 0 or pos_y.size(0) == 0:
-            return torch.tensor(0.0, device=pos_x.device)
-        
-        # Directed Hausdorff distances
-        diff_xy = pos_x.unsqueeze(1) - pos_y.unsqueeze(0)  # [num_x, num_y, dim]
-        dist_xy = torch.norm(diff_xy, dim=-1)  # [num_x, num_y]
-        h_xy = dist_xy.min(dim=1)[0].max()  # max over x of min over y
-        
-        diff_yx = pos_y.unsqueeze(1) - pos_x.unsqueeze(0)  # [num_y, num_x, dim]
-        dist_yx = torch.norm(diff_yx, dim=-1)  # [num_y, num_x]
-        h_yx = dist_yx.min(dim=1)[0].max()  # max over y of min over x
-        
-        return torch.max(h_xy, h_yx)
+    def centroid_distance(
+        pos_x: torch.Tensor,
+        pos_y: torch.Tensor,
+        mask_x: Optional[torch.Tensor] = None,
+        mask_y: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        pos_x, mask_x = GeometricInvariants._ensure_batch(pos_x, mask_x)
+        pos_y, mask_y = GeometricInvariants._ensure_batch(pos_y, mask_y)
+
+        if mask_x is not None:
+            denom_x = mask_x.sum(dim=1, keepdim=True).clamp_min(GeometricInvariants._EPS)
+            centroid_x = (pos_x * mask_x.unsqueeze(-1)).sum(dim=1) / denom_x
+        else:
+            centroid_x = pos_x.mean(dim=1)
+
+        if mask_y is not None:
+            denom_y = mask_y.sum(dim=1, keepdim=True).clamp_min(GeometricInvariants._EPS)
+            centroid_y = (pos_y * mask_y.unsqueeze(-1)).sum(dim=1) / denom_y
+        else:
+            centroid_y = pos_y.mean(dim=1)
+
+        return torch.norm(centroid_x - centroid_y, dim=-1)
+
+    @staticmethod
+    def hausdorff_distance(
+        pos_x: torch.Tensor,
+        pos_y: torch.Tensor,
+        mask_x: Optional[torch.Tensor] = None,
+        mask_y: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        pos_x, mask_x = GeometricInvariants._ensure_batch(pos_x, mask_x)
+        pos_y, mask_y = GeometricInvariants._ensure_batch(pos_y, mask_y)
+
+        distances = torch.cdist(pos_x, pos_y, p=2)
+
+        if mask_y is not None:
+            invalid = (mask_y <= 0).unsqueeze(1)
+            distances = distances.masked_fill(invalid, float('inf'))
+
+        min_xy, _ = distances.min(dim=2)
+        if mask_x is not None:
+            min_xy = min_xy.masked_fill(mask_x <= 0, 0.0)
+        h_xy, _ = min_xy.max(dim=1)
+
+        distances_reverse = distances.transpose(1, 2)
+        if mask_x is not None:
+            invalid = (mask_x <= 0).unsqueeze(1)
+            distances_reverse = distances_reverse.masked_fill(invalid, float('inf'))
+
+        min_yx, _ = distances_reverse.min(dim=2)
+        if mask_y is not None:
+            min_yx = min_yx.masked_fill(mask_y <= 0, 0.0)
+        h_yx, _ = min_yx.max(dim=1)
+
+        return torch.maximum(h_xy, h_yx)
 
 
 class ETNNLayer(nn.Module):
@@ -97,18 +117,37 @@ class ETNNLayer(nn.Module):
         self.hidden_dim = hidden_dim
         self.neighborhood_names = list(neighborhood_names)
         self.use_position_update = use_position_update
-        self.num_invariant_terms = 3  # pairwise distance, centroid distance, Hausdorff distance
+        self.num_invariant_terms = 4  # Direct distance + three geometric invariants
 
         self.message_functions = nn.ModuleDict()
         self.position_functions = nn.ModuleDict()
-        self.cell_to_nodes: Dict[int, torch.Tensor] = {}
+        self.max_nodes: int = 0
+        if cell_to_nodes is not None and len(cell_to_nodes) > 0:
+            self.max_nodes = max((len(nodes) for nodes in cell_to_nodes), default=0)
+        if self.max_nodes <= 0:
+            self.max_nodes = 1
+            cell_to_nodes = [[idx] for idx in range(len(cell_to_nodes or []))]
 
-        if cell_to_nodes is not None:
+        if cell_to_nodes is not None and len(cell_to_nodes) > 0:
+            index_rows: List[List[int]] = []
+            mask_rows: List[List[float]] = []
             for idx, nodes in enumerate(cell_to_nodes):
-                if nodes:
-                    self.cell_to_nodes[idx] = torch.tensor(nodes, dtype=torch.long)
-                else:
-                    self.cell_to_nodes[idx] = torch.tensor([], dtype=torch.long)
+                if not nodes:
+                    nodes = [idx]
+                padded = list(nodes)
+                pad_value = nodes[0]
+                while len(padded) < self.max_nodes:
+                    padded.append(pad_value)
+                mask = [1.0] * len(nodes) + [0.0] * (self.max_nodes - len(nodes))
+                index_rows.append(padded[:self.max_nodes])
+                mask_rows.append(mask[:self.max_nodes])
+            self.register_buffer('cell_node_indices', torch.tensor(index_rows, dtype=torch.long))
+            self.register_buffer('cell_node_mask', torch.tensor(mask_rows, dtype=torch.float32))
+            self.has_node_info = True
+        else:
+            self.register_buffer('cell_node_indices', torch.empty(0, dtype=torch.long))
+            self.register_buffer('cell_node_mask', torch.empty(0, dtype=torch.float32))
+            self.has_node_info = False
 
         for name in self.neighborhood_names:
             self.message_functions[name] = nn.Sequential(
@@ -129,28 +168,16 @@ class ETNNLayer(nn.Module):
             nn.Linear(hidden_dim, hidden_dim)
         )
 
-    def _gather_cell_positions(self, positions: torch.Tensor, cell_idx: int) -> torch.Tensor:
-        indices = self.cell_to_nodes.get(cell_idx)
-        if indices is None or indices.numel() == 0:
-            return positions[:, cell_idx:cell_idx + 1, :]
-        if indices.device != positions.device:
-            indices = indices.to(positions.device)
-            self.cell_to_nodes[cell_idx] = indices
-        return positions.index_select(1, indices)
-
-    @staticmethod
-    def _centroid_distance(src_pos: torch.Tensor, dst_pos: torch.Tensor) -> torch.Tensor:
-        centroid_src = src_pos.mean(dim=1)
-        centroid_dst = dst_pos.mean(dim=1)
-        return torch.norm(centroid_src - centroid_dst, dim=-1, keepdim=True)
-
-    @staticmethod
-    def _hausdorff_distance(src_pos: torch.Tensor, dst_pos: torch.Tensor) -> torch.Tensor:
-        diff = src_pos.unsqueeze(2) - dst_pos.unsqueeze(1)
-        distances = torch.norm(diff, dim=-1)
-        forward = distances.min(dim=2)[0].max(dim=1)[0]
-        backward = distances.min(dim=1)[0].max(dim=1)[0]
-        return torch.max(forward, backward).unsqueeze(-1)
+    def _node_positions(self, positions: torch.Tensor) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        if not self.has_node_info or self.cell_node_indices.numel() == 0:
+            return None, None
+        device = positions.device
+        indices = self.cell_node_indices.to(device)
+        mask = self.cell_node_mask.to(device)
+        batch_size = positions.size(0)
+        batch_idx = torch.arange(batch_size, device=device).view(batch_size, 1, 1)
+        node_positions = positions[batch_idx, indices, :]
+        return node_positions, mask
 
     def forward(
         self,
@@ -163,6 +190,11 @@ class ETNNLayer(nn.Module):
 
         message_accumulator = torch.zeros_like(features)
         position_updates = torch.zeros_like(positions) if self.use_position_update else None
+
+        node_positions = None
+        node_mask = None
+        if self.has_node_info:
+            node_positions, node_mask = self._node_positions(positions)
 
         for name in self.neighborhood_names:
             if name not in edge_indices:
@@ -179,17 +211,27 @@ class ETNNLayer(nn.Module):
             rel_pos = positions[:, src, :] - positions[:, dst, :]
             distances = torch.norm(rel_pos, dim=-1, keepdim=True)
 
-            centroid_terms: List[torch.Tensor] = []
-            hausdorff_terms: List[torch.Tensor] = []
-            for s_idx, d_idx in zip(src.tolist(), dst.tolist()):
-                src_pos = self._gather_cell_positions(positions, s_idx)
-                dst_pos = self._gather_cell_positions(positions, d_idx)
-                centroid_terms.append(self._centroid_distance(src_pos, dst_pos))
-                hausdorff_terms.append(self._hausdorff_distance(src_pos, dst_pos))
+            if node_positions is not None and node_mask is not None:
+                src_node_pos = node_positions[:, src, :, :]  # [batch, edges, max_nodes, dim]
+                dst_node_pos = node_positions[:, dst, :, :]
+                src_node_mask = node_mask[src]  # [edges, max_nodes]
+                dst_node_mask = node_mask[dst]
 
-            centroid_tensor = torch.stack(centroid_terms, dim=1)
-            hausdorff_tensor = torch.stack(hausdorff_terms, dim=1)
-            invariants = torch.cat([distances, centroid_tensor, hausdorff_tensor], dim=-1)
+                batch_size, num_edges, _, _ = src_node_pos.shape
+                src_flat = src_node_pos.reshape(batch_size * num_edges, self.max_nodes, -1)
+                dst_flat = dst_node_pos.reshape(batch_size * num_edges, self.max_nodes, -1)
+                src_mask_flat = src_node_mask.unsqueeze(0).expand(batch_size, -1, -1).reshape(batch_size * num_edges, self.max_nodes)
+                dst_mask_flat = dst_node_mask.unsqueeze(0).expand(batch_size, -1, -1).reshape(batch_size * num_edges, self.max_nodes)
+
+                pairwise = GeometricInvariants.pairwise_distances(src_flat, dst_flat, src_mask_flat, dst_mask_flat).view(batch_size, num_edges, 1)
+                centroid = GeometricInvariants.centroid_distance(src_flat, dst_flat, src_mask_flat, dst_mask_flat).view(batch_size, num_edges, 1)
+                hausdorff = GeometricInvariants.hausdorff_distance(src_flat, dst_flat, src_mask_flat, dst_mask_flat).view(batch_size, num_edges, 1)
+            else:
+                pairwise = distances
+                centroid = distances
+                hausdorff = distances
+
+            invariants = torch.cat([distances, pairwise, centroid, hausdorff], dim=-1)
 
             msg_input = torch.cat([h_src, h_dst, invariants], dim=-1)
             messages = self.message_functions[name](msg_input)
