@@ -347,6 +347,8 @@ class ETNNBaseline(BaselineModel):
             hidden_dim=self.hidden_dim,
             num_layers=self.num_layers,
             combinatorial_complex=complex_structure,
+            use_position_update=self.use_geometric_features,
+            use_geometric_features=self.use_geometric_features,
         ).to(self.device)
 
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
@@ -467,6 +469,7 @@ class ETNNForecastingModel(nn.Module):
         num_layers: int,
         combinatorial_complex: CombinatorialComplex,
         use_position_update: bool = True,
+        use_geometric_features: bool = True,
     ) -> None:
         super().__init__()
 
@@ -474,6 +477,7 @@ class ETNNForecastingModel(nn.Module):
         self.dynamic_dim = input_dim
         self.base_dim = base_features.size(1)
         self.hidden_dim = hidden_dim
+        self.use_geometric_features = use_geometric_features
 
         self.register_buffer('base_features', base_features)
         self.register_buffer('base_positions', positions)
@@ -485,8 +489,9 @@ class ETNNForecastingModel(nn.Module):
             ETNNLayer(
                 hidden_dim,
                 neighborhood_names,
-                cell_to_nodes=combinatorial_complex.cell_to_nodes,
-                use_position_update=use_position_update
+                cell_to_nodes=combinatorial_complex.cell_to_nodes if use_geometric_features else None,
+                use_position_update=use_position_update,
+                use_geometric_features=use_geometric_features,
             )
             for _ in range(num_layers)
         ])

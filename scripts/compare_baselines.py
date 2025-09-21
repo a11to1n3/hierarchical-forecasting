@@ -81,9 +81,9 @@ def create_baseline_models(input_size: int,
         baselines['PatchTST'] = PatchTSTBaseline(checkpoint_path=patchtst_checkpoint)
     else:
         print("No PatchTST checkpoint provided; training a fresh PatchTST baseline from scratch.")
-        baselines['PatchTST'] = PatchTSTBaseline(allow_training=True)
+    baselines['PatchTST'] = PatchTSTBaseline(allow_training=True, epochs=240)
 
-    baselines['TimesNet'] = TimesNetBaseline()
+    baselines['TimesNet'] = TimesNetBaseline(epochs=240)
 
     baselines.update({
         'Bottom_Up_Linear': BottomUpBaseline(base_model='linear'),

@@ -111,24 +111,26 @@ class ETNNLayer(nn.Module):
         neighborhood_names: Iterable[str],
         cell_to_nodes: Optional[List[List[int]]] = None,
         use_position_update: bool = True,
+        use_geometric_features: bool = True,
     ) -> None:
         super().__init__()
 
         self.hidden_dim = hidden_dim
         self.neighborhood_names = list(neighborhood_names)
         self.use_position_update = use_position_update
-        self.num_invariant_terms = 4  # Direct distance + three geometric invariants
+        self.use_geometric_features = use_geometric_features
+        self.num_invariant_terms = 4 if use_geometric_features else 1
 
         self.message_functions = nn.ModuleDict()
         self.position_functions = nn.ModuleDict()
         self.max_nodes: int = 0
-        if cell_to_nodes is not None and len(cell_to_nodes) > 0:
+        if self.use_geometric_features and cell_to_nodes is not None and len(cell_to_nodes) > 0:
             self.max_nodes = max((len(nodes) for nodes in cell_to_nodes), default=0)
-        if self.max_nodes <= 0:
+        if self.use_geometric_features and self.max_nodes <= 0:
             self.max_nodes = 1
             cell_to_nodes = [[idx] for idx in range(len(cell_to_nodes or []))]
 
-        if cell_to_nodes is not None and len(cell_to_nodes) > 0:
+        if self.use_geometric_features and cell_to_nodes is not None and len(cell_to_nodes) > 0:
             index_rows: List[List[int]] = []
             mask_rows: List[List[float]] = []
             for idx, nodes in enumerate(cell_to_nodes):
@@ -193,7 +195,7 @@ class ETNNLayer(nn.Module):
 
         node_positions = None
         node_mask = None
-        if self.has_node_info:
+        if self.use_geometric_features and self.has_node_info:
             node_positions, node_mask = self._node_positions(positions)
 
         for name in self.neighborhood_names:
@@ -211,7 +213,7 @@ class ETNNLayer(nn.Module):
             rel_pos = positions[:, src, :] - positions[:, dst, :]
             distances = torch.norm(rel_pos, dim=-1, keepdim=True)
 
-            if node_positions is not None and node_mask is not None:
+            if self.use_geometric_features and node_positions is not None and node_mask is not None:
                 src_node_pos = node_positions[:, src, :, :]  # [batch, edges, max_nodes, dim]
                 dst_node_pos = node_positions[:, dst, :, :]
                 src_node_mask = node_mask[src]  # [edges, max_nodes]
@@ -231,7 +233,10 @@ class ETNNLayer(nn.Module):
                 centroid = distances
                 hausdorff = distances
 
-            invariants = torch.cat([distances, pairwise, centroid, hausdorff], dim=-1)
+            if self.use_geometric_features:
+                invariants = torch.cat([distances, pairwise, centroid, hausdorff], dim=-1)
+            else:
+                invariants = distances
 
             msg_input = torch.cat([h_src, h_dst, invariants], dim=-1)
             messages = self.message_functions[name](msg_input)

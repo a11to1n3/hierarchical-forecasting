@@ -96,11 +96,12 @@ def create_etnn_models(
     }
 
     if patchtst_checkpoint:
-        models['PatchTST'] = PatchTSTBaseline(checkpoint_path=patchtst_checkpoint)
+        models['PatchTST'] = PatchTSTBaseline(checkpoint_path=patchtst_checkpoint, epochs=240)
     else:
-        print("Skipping PatchTST evaluation baseline (no checkpoint provided).")
+        print("No PatchTST checkpoint provided; training a fresh PatchTST baseline from scratch.")
+        models['PatchTST'] = PatchTSTBaseline(allow_training=True, epochs=240)
 
-    models['TimesNet'] = TimesNetBaseline()
+    models['TimesNet'] = TimesNetBaseline(epochs=240)
 
     return models
 
