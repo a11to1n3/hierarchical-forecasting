@@ -462,12 +462,13 @@ def run_baseline_comparison(
 
     def build_transformer_dataset(current_df: pd.DataFrame,
                                   history_df: Optional[pd.DataFrame] = None,
-                                  window_size: int = TRANSFORMER_WINDOW) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+                                  window_size: int = TRANSFORMER_WINDOW) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         current_df = _ensure_date_column(current_df)
         if current_df.empty or window_size <= 0:
             return (np.empty((0, window_size), dtype=np.float32),
                     np.empty(0, dtype=np.float32),
-                    np.empty(0, dtype=object))
+                    np.empty(0, dtype=object),
+                    np.empty(0, dtype=int))
 
         required_cols = {'companyID', 'storeID', 'skuID', 'target', 'date'}
         if not required_cols.issubset(current_df.columns):
@@ -485,6 +486,7 @@ def run_baseline_comparison(
         sequences: List[np.ndarray] = []
         targets_seq: List[float] = []
         entities_seq: List[Tuple] = []
+        levels_seq: List[int] = []
 
         for entity, group in combined.groupby(['companyID', 'storeID', 'skuID'], sort=False):
             values = group['target'].astype(np.float32).to_numpy()
@@ -501,16 +503,19 @@ def run_baseline_comparison(
                 sequences.append(window)
                 targets_seq.append(values[idx])
                 entities_seq.append(entity)
+                levels_seq.append(max(len(entity) - 1, 0))
 
         if not sequences:
             return (np.empty((0, window_size), dtype=np.float32),
                     np.empty(0, dtype=np.float32),
-                    np.empty(0, dtype=object))
+                    np.empty(0, dtype=object),
+                    np.empty(0, dtype=int))
 
         X_seq = np.stack(sequences)
         y_seq = np.asarray(targets_seq, dtype=np.float32)
         entities_arr = np.asarray(entities_seq, dtype=object)
-        return X_seq, y_seq, entities_arr
+        levels_arr = np.asarray(levels_seq, dtype=int)
+        return X_seq, y_seq, entities_arr, levels_arr
 
     X_train, y_train, levels_train, entities_train, dates_train = prepare_split_data(train_data)
     X_val, y_val, levels_val, entities_val, dates_val = prepare_split_data(val_data)
@@ -524,14 +529,14 @@ def run_baseline_comparison(
     y_val_original = inverse_target(y_val)
     y_test_original = inverse_target(y_test)
 
-    transformer_train_X, transformer_train_y, transformer_train_entities = build_transformer_dataset(
+    transformer_train_X, transformer_train_y, transformer_train_entities, transformer_train_levels = build_transformer_dataset(
         train_data, window_size=TRANSFORMER_WINDOW
     )
-    transformer_val_X, transformer_val_y, transformer_val_entities = build_transformer_dataset(
+    transformer_val_X, transformer_val_y, transformer_val_entities, transformer_val_levels = build_transformer_dataset(
         val_data, history_df=train_data, window_size=TRANSFORMER_WINDOW
     )
     history_for_test = pd.concat([train_data, val_data]) if not train_data.empty or not val_data.empty else train_data
-    transformer_test_X, transformer_test_y, transformer_test_entities = build_transformer_dataset(
+    transformer_test_X, transformer_test_y, transformer_test_entities, transformer_test_levels = build_transformer_dataset(
         test_data, history_df=history_for_test, window_size=TRANSFORMER_WINDOW
     )
 
@@ -625,20 +630,28 @@ def run_baseline_comparison(
                 X_val_model = transformer_val_X
                 y_val_model = transformer_val_y
                 entities_val_model = transformer_val_entities
+                levels_val_model = transformer_val_levels
                 X_test_model = transformer_test_X
                 y_test_model = transformer_test_y
                 entities_test_model = transformer_test_entities
-                val_kwargs: Dict[str, Any] = {}
-                test_kwargs: Dict[str, Any] = {}
+                levels_test_model = transformer_test_levels
+                val_kwargs: Dict[str, Any] = {
+                    'entity_levels': levels_val_model
+                }
+                test_kwargs: Dict[str, Any] = {
+                    'entity_levels': levels_test_model
+                }
                 y_val_original_for_metrics = transformer_val_y_original
                 y_test_original_for_metrics = transformer_test_y_original
             else:
                 X_val_model = X_val
                 y_val_model = y_val
                 entities_val_model = entities_val
+                levels_val_model = levels_val
                 X_test_model = X_test
                 y_test_model = y_test
                 entities_test_model = entities_test
+                levels_test_model = levels_test
                 val_kwargs = {
                     'entity_levels': levels_val,
                     'entity_ids': entities_val
