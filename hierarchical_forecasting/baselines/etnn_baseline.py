@@ -442,16 +442,27 @@ class ETNNBaseline(BaselineModel):
                 raise KeyError(f"Unknown entity identifier {raw}")
             entity_indices.append(self._entity_index[canonical])
 
-        entity_tensor = torch.tensor(entity_indices, dtype=torch.long).to(self.device)
+        entity_tensor = torch.tensor(entity_indices, dtype=torch.long)
 
-        X_scaled = self.scaler_features.transform(X_test)
-        X_tensor = torch.FloatTensor(X_scaled).to(self.device)
+        X_scaled = self.scaler_features.transform(X_test).astype(np.float32)
 
         self.model.eval()
+        preds_buffer: List[np.ndarray] = []
+        batch_size = min(self.batch_size, max(1, len(X_scaled)))
+
         with torch.no_grad():
-            preds_scaled = self.model(X_tensor, entity_tensor)
-        preds = preds_scaled.cpu().numpy().reshape(-1, 1)
-        preds = self.scaler_targets.inverse_transform(preds)
+            for start in range(0, len(X_scaled), batch_size):
+                end = start + batch_size
+                X_chunk = torch.from_numpy(X_scaled[start:end]).to(self.device)
+                entity_chunk = entity_tensor[start:end].to(self.device)
+                preds_scaled = self.model(X_chunk, entity_chunk)
+                preds_buffer.append(preds_scaled.cpu().numpy())
+
+        if not preds_buffer:
+            return np.empty((0, 1), dtype=np.float32)
+
+        preds_scaled_full = np.concatenate(preds_buffer, axis=0).reshape(-1, 1)
+        preds = self.scaler_targets.inverse_transform(preds_scaled_full)
 
         if self._target_is_vector:
             return preds.ravel()
