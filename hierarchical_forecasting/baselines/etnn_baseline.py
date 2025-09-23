@@ -233,6 +233,8 @@ class ETNNBaseline(BaselineModel):
             return entity
         if isinstance(entity, list):
             return tuple(entity)
+        if isinstance(entity, np.ndarray):
+            return tuple(entity.tolist())
         if isinstance(entity, str):
             delimiter = '|' if '|' in entity else '_'
             parts = entity.split(delimiter)

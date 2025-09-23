@@ -616,8 +616,12 @@ def run_baseline_comparison(
 
             train_kwargs: Dict[str, Any] = {}
             if isinstance(model, ETNNBaseline):
+                hierarchy_for_etnn = {
+                    'entities': [tuple(ent.tolist()) if isinstance(ent, np.ndarray) else tuple(ent) if not isinstance(ent, tuple) else ent
+                                 for ent in entities_train_model]
+                }
                 train_kwargs.update({
-                    'hierarchy': hierarchy,
+                    'hierarchy': hierarchy_for_etnn,
                     'entity_ids': entities_train_model
                 })
             elif not use_window_inputs:
