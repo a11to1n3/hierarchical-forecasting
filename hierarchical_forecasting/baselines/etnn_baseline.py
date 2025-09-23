@@ -34,6 +34,8 @@ class ETNNBaseline(BaselineModel):
                  learning_rate: float = 0.001,
                  epochs: int = 150,
                  batch_size: int = 64,
+                 lr_gamma: float = 0.95,
+                 early_stop_patience: int = 10,
                  device: Optional[str] = None):
         """
         Initialize ETNN baseline.
@@ -45,6 +47,9 @@ class ETNNBaseline(BaselineModel):
             use_geometric_features: Whether to use geometric invariants
             learning_rate: Learning rate for training
             epochs: Number of training epochs
+            batch_size: Batch size for training/evaluation
+            lr_gamma: Exponential LR decay factor
+            early_stop_patience: Stop after this many epochs without improvement
             device: Device to use ('cpu', 'cuda', 'mps')
         """
         super().__init__(name="ETNN")
@@ -55,6 +60,8 @@ class ETNNBaseline(BaselineModel):
         self.learning_rate = learning_rate
         self.epochs = epochs
         self.batch_size = batch_size
+        self.lr_gamma = lr_gamma
+        self.early_stop_patience = max(0, early_stop_patience)
         if device is None:
             resolved = 'cuda' if torch.cuda.is_available() else 'cpu'
         elif isinstance(device, torch.device):
@@ -358,6 +365,7 @@ class ETNNBaseline(BaselineModel):
         ).to(self.device)
 
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.lr_gamma) if self.lr_gamma < 1.0 else None
         criterion = nn.MSELoss()
         use_amp = self.device.type == 'cuda'
         scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
@@ -379,6 +387,9 @@ class ETNNBaseline(BaselineModel):
             flush=True,
         )
         start_time = time.time()
+        best_loss = float('inf')
+        epochs_without_improve = 0
+
         for epoch in range(total_epochs):
             epoch_loss = 0.0
             total_samples = 0
@@ -409,6 +420,13 @@ class ETNNBaseline(BaselineModel):
                 total_samples += batch_size
 
             avg_loss = epoch_loss / max(1, total_samples)
+            if scheduler is not None:
+                scheduler.step()
+            if avg_loss + 1e-6 < best_loss:
+                best_loss = avg_loss
+                epochs_without_improve = 0
+            else:
+                epochs_without_improve += 1
             elapsed = time.time() - start_time
             epochs_done = epoch + 1
             avg_epoch_time = elapsed / epochs_done
@@ -418,6 +436,10 @@ class ETNNBaseline(BaselineModel):
                 f"| Elapsed: {elapsed:.1f}s | ETA: {remaining:.1f}s",
                 flush=True,
             )
+
+            if self.early_stop_patience and epochs_without_improve >= self.early_stop_patience:
+                print(f"Early stopping triggered after {epochs_done} epochs (best loss {best_loss:.6f}).")
+                break
 
         self.is_fitted = True
         return self

@@ -70,11 +70,11 @@ def create_baseline_models(input_size: int,
         'Hierarchical_RF': HierarchicalRandomForest(n_estimators=50),
 
         # Neural network baselines
-        'LSTM': LSTMBaseline(input_size=input_size, hidden_size=32, epochs=120),
-        'Multi_Entity_LSTM': MultiEntityLSTM(input_size=input_size, hidden_size=32, epochs=120),
+        'LSTM': LSTMBaseline(input_size=input_size, hidden_size=32, epochs=80),
+        'Multi_Entity_LSTM': MultiEntityLSTM(input_size=input_size, hidden_size=32, epochs=80),
         
         # ETNN-based baselines (Topological Deep Learning)
-        'ETNN': ETNNBaseline(hidden_dim=32, num_layers=2, epochs=120),
+        'ETNN': ETNNBaseline(hidden_dim=32, num_layers=2, epochs=80, use_geometric_features=False, batch_size=64),
     }
 
     if patchtst_checkpoint:

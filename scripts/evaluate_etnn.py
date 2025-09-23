@@ -90,15 +90,17 @@ def create_etnn_models(
             hidden_dim=32,
             num_layers=2,
             spatial_dim=2,
-            use_geometric_features=True,
-            epochs=100
+            use_geometric_features=False,
+            epochs=80,
+            batch_size=64
         ),
         'ETNN_Deep': ETNNBaseline(
             hidden_dim=64,
             num_layers=4,
             spatial_dim=3,
-            use_geometric_features=True,
-            epochs=150
+            use_geometric_features=False,
+            epochs=80,
+            batch_size=64
         ),
     }
 
