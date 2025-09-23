@@ -257,6 +257,8 @@ def evaluate_model(
         Dictionary with evaluation metrics
     """
     try:
+        entity_levels_arg = kwargs.pop('entity_levels', None)
+
         start_time = time.time()
         predictions = predictions_override if predictions_override is not None else model.predict(X_test, **kwargs)
         prediction_time = time.time() - start_time
@@ -297,13 +299,12 @@ def evaluate_model(
         }
 
         if entities_test is not None and hierarchy is not None:
-            levels_for_hier = kwargs.get('entity_levels')
             hier_metrics = evaluate_hierarchical_metrics(
                 y_true_original=y_true_for_metrics,
                 y_pred_original=y_pred_for_metrics,
                 entities_test=entities_test,
                 hierarchy=hierarchy,
-                hierarchy_levels=levels_for_hier,
+                hierarchy_levels=entity_levels_arg,
             )
             results.update(hier_metrics)
 
@@ -578,14 +579,18 @@ def run_baseline_comparison(
             start_time = time.time()
 
             is_transformer = isinstance(model, transformer_types)
-            if is_transformer:
+            use_window_inputs = is_transformer or isinstance(model, ETNNBaseline)
+
+            if use_window_inputs:
                 X_train_model = transformer_train_X
                 y_train_model = transformer_train_y
                 entities_train_model = transformer_train_entities
+                levels_train_model = transformer_train_levels
             else:
                 X_train_model = X_train
                 y_train_model = y_train
                 entities_train_model = entities_train
+                levels_train_model = levels_train
 
             if X_train_model.shape[0] == 0:
                 print(f"Skipping {name}: insufficient training data after preprocessing.")
@@ -610,11 +615,16 @@ def run_baseline_comparison(
                 continue
 
             train_kwargs: Dict[str, Any] = {}
-            if not is_transformer:
+            if isinstance(model, ETNNBaseline):
                 train_kwargs.update({
                     'hierarchy': hierarchy,
-                    'entity_levels': levels_train,
-                    'entity_ids': entities_train
+                    'entity_ids': entities_train_model
+                })
+            elif not use_window_inputs:
+                train_kwargs.update({
+                    'hierarchy': hierarchy,
+                    'entity_levels': levels_train_model,
+                    'entity_ids': entities_train_model
                 })
 
             if 'Prophet' in name:
@@ -626,7 +636,7 @@ def run_baseline_comparison(
 
             print(f"Training completed in {training_time:.2f} seconds")
 
-            if is_transformer:
+            if use_window_inputs:
                 X_val_model = transformer_val_X
                 y_val_model = transformer_val_y
                 entities_val_model = transformer_val_entities
@@ -641,6 +651,9 @@ def run_baseline_comparison(
                 test_kwargs: Dict[str, Any] = {
                     'entity_levels': levels_test_model
                 }
+                if isinstance(model, ETNNBaseline):
+                    val_kwargs['entity_ids'] = entities_val_model
+                    test_kwargs['entity_ids'] = entities_test_model
                 y_val_original_for_metrics = transformer_val_y_original
                 y_test_original_for_metrics = transformer_test_y_original
             else:
@@ -663,7 +676,7 @@ def run_baseline_comparison(
                 y_val_original_for_metrics = y_val_original
                 y_test_original_for_metrics = y_test_original
 
-            if not is_transformer and 'Prophet' in name:
+            if not use_window_inputs and 'Prophet' in name:
                 val_kwargs['dates'] = dates_val
                 test_kwargs['dates'] = dates_test
 
@@ -716,6 +729,10 @@ def run_baseline_comparison(
                 'Test_WPE': test_metrics.get('WPE', np.nan),
                 'Prediction_Time': test_metrics['Prediction_Time']
             }
+
+            for key, value in test_metrics.items():
+                if key.startswith('Rank_'):
+                    result[key] = value
 
             results.append(result)
 
